@@ -27,6 +27,14 @@ the front and rear cameras record at the same time into a single video.
 - Volume buttons act as the shutter
 - Works in portrait and landscape and follows the phone's auto-rotate setting
 
+**Export for social media**
+- Tap the **⇪** button next to the gallery thumbnail (or long-press the thumbnail)
+- Pick the last capture or any photo/video from your gallery
+- Choose a size: Instagram Reel/Story (9:16), Post 4:5 or 1:1; YouTube Video (16:9) or Shorts (9:16);
+  Facebook Reel/Story (9:16), Feed 4:5 or landscape 16:9
+- **Crop to fill** (no bars) or **Fit** (whole picture, black bars)
+- The result is saved to `Movies/VlogCam/Exports` or `Pictures/VlogCam/Exports`, with a **Share** button to post it straight away
+
 Photos are saved to `Pictures/VlogCam`, videos to `Movies/VlogCam`, so they show up in your gallery.
 
 ## Install on your phone

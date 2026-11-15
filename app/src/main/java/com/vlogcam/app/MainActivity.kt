@@ -29,7 +29,9 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
@@ -187,6 +189,12 @@ class MainActivity : AppCompatActivity() {
             } else {
                 showMessage("Camera permission is needed.\nGrant it in Settings → Apps → VlogCam.")
             }
+        }
+
+    private val exporter by lazy { Exporter(this) }
+    private val pickMedia =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) chooseExportPreset(uri)
         }
 
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -745,6 +753,8 @@ class MainActivity : AppCompatActivity() {
         b.btnSnapshot.setOnClickListener { takeDualSnapshot() }
         b.btnPause.setOnClickListener { togglePause() }
         b.thumbnail.setOnClickListener { openLastMedia() }
+        b.thumbnail.setOnLongClickListener { startExportFlow(); true }
+        b.btnExport.setOnClickListener { startExportFlow() }
         b.updateBanner.setOnClickListener { onUpdateBannerTapped() }
 
         b.tabPhoto.setOnClickListener { setMode(Mode.PHOTO) }
@@ -1352,6 +1362,95 @@ class MainActivity : AppCompatActivity() {
             startActivity(Updater.installIntent(this, apk))
         } catch (e: Exception) {
             Toast.makeText(this, "Could not open installer: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ---------------------------------------------------------------- export for social media
+
+    private fun startExportFlow() {
+        if (isRecording) {
+            Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pick = {
+            pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+        }
+        val last = lastMediaUri ?: run { pick(); return }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Export which file?")
+            .setItems(
+                arrayOf(if (lastMediaIsVideo) "Last video" else "Last photo", "Choose from gallery…")
+            ) { _, which -> if (which == 0) chooseExportPreset(last) else pick() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseExportPreset(uri: Uri) {
+        val presets = ExportPreset.ALL
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Export for…")
+            .setItems(presets.map { it.label }.toTypedArray()) { _, i -> chooseExportFit(uri, presets[i]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseExportFit(uri: Uri, preset: ExportPreset) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("${preset.platform} · ${preset.name}")
+            .setItems(
+                arrayOf("Crop to fill the frame (no bars)", "Fit the whole picture (black bars)")
+            ) { _, which -> runExport(uri, preset, crop = which == 0) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runExport(uri: Uri, preset: ExportPreset, crop: Boolean) {
+        val progress = MaterialAlertDialogBuilder(this)
+            .setTitle("Exporting for ${preset.platform}")
+            .setMessage("Starting…")
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> exporter.cancel() }
+            .create()
+        progress.show()
+        exporter.export(
+            uri, preset, crop,
+            onProgress = { p -> progress.setMessage(if (p >= 0) "Converting… $p%" else "Converting…") },
+        ) { out, error ->
+            if (progress.isShowing) progress.dismiss()
+            if (isFinishing || isDestroyed) return@export
+            if (out == null) {
+                if (error != null) {
+                    Toast.makeText(this, "Export failed: $error", Toast.LENGTH_LONG).show()
+                }
+                return@export
+            }
+            val video = exporter.isVideo(out)
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Export ready")
+                .setMessage(
+                    "Saved ${preset.width}×${preset.height} to " +
+                        (if (video) "Movies" else "Pictures") + "/VlogCam/Exports."
+                )
+                .setPositiveButton("Share") { _, _ -> shareMedia(out, video) }
+                .setNeutralButton("View") { _, _ ->
+                    lastMediaUri = out
+                    lastMediaIsVideo = video
+                    openLastMedia()
+                }
+                .setNegativeButton("Done", null)
+                .show()
+        }
+    }
+
+    private fun shareMedia(uri: Uri, video: Boolean) {
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(if (video) "video/mp4" else "image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivity(Intent.createChooser(send, "Share to…"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "No app to share with", Toast.LENGTH_SHORT).show()
         }
     }
 

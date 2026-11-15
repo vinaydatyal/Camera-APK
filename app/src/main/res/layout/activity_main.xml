@@ -255,6 +255,19 @@
                     android:contentDescription="Last capture"
                     android:padding="2dp"
                     android:scaleType="centerCrop" />
+
+                <TextView
+                    android:id="@+id/btnExport"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:layout_gravity="start|center_vertical"
+                    android:layout_marginStart="64dp"
+                    android:background="@drawable/circle_button"
+                    android:contentDescription="Export for social media"
+                    android:gravity="center"
+                    android:text="⇪"
+                    android:textColor="#FFFFFF"
+                    android:textSize="20sp" />
             </FrameLayout>
 
             <ImageButton
