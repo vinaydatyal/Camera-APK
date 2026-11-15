@@ -86,6 +86,7 @@ class MainActivity : AppCompatActivity() {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private var recordingPaused = false
+    private var dualOwner: DisposableLifecycleOwner? = null
     private var observedCamera: Camera? = null
     private var stabilizationSupported = false
     private var stabilizationActive = false
@@ -320,6 +321,9 @@ class MainActivity : AppCompatActivity() {
         imageCapture = null
         videoCapture = null
         stabilizationActive = false
+        // Drop the cached dual session so the next bind uses the current layout.
+        dualOwner?.destroy()
+        dualOwner = null
     }
 
     private fun bindSingle(provider: ProcessCameraProvider, allowStab: Boolean) {
@@ -448,10 +452,12 @@ class MainActivity : AppCompatActivity() {
             DualComposer.settings(dualLayout, pipCorner, DualComposer.PIP_SIZES[pipSizeIndex])
 
         p.setSurfaceProvider(b.previewView.surfaceProvider)
+        val owner = DisposableLifecycleOwner(this)
+        dualOwner = owner
         val concurrent = provider.bindToLifecycle(
             listOf(
-                SingleCameraConfig(primaryInfo.cameraSelector, group, primarySettings, this),
-                SingleCameraConfig(secondaryInfo.cameraSelector, group, secondarySettings, this),
+                SingleCameraConfig(primaryInfo.cameraSelector, group, primarySettings, owner),
+                SingleCameraConfig(secondaryInfo.cameraSelector, group, secondarySettings, owner),
             )
         )
         dualCameras = concurrent.cameras
