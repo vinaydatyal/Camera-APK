@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
     private enum class Mode { PHOTO, VIDEO, DUAL }
 
     private lateinit var b: ActivityMainBinding
-    private val mainExecutor by lazy { ContextCompat.getMainExecutor(this) }
+    private val uiExecutor by lazy { ContextCompat.getMainExecutor(this) }
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("vlogcam", Context.MODE_PRIVATE) }
@@ -252,8 +252,8 @@ class MainActivity : AppCompatActivity() {
             extFuture.addListener({
                 extensionsManager = runCatching { extFuture.get() }.getOrNull()
                 bindCamera()
-            }, mainExecutor)
-        }, mainExecutor)
+            }, uiExecutor)
+        }, uiExecutor)
     }
 
     private fun displayRotation(): Int =
@@ -903,7 +903,7 @@ class MainActivity : AppCompatActivity() {
             MediaSaver.imageValues(MediaSaver.fileName("IMG"))
         ).setMetadata(metadata).build()
         flashScreen()
-        ic.takePicture(options, mainExecutor, object : ImageCapture.OnImageSavedCallback {
+        ic.takePicture(options, uiExecutor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 output.savedUri?.let { setLastMedia(it, false) }
             }
@@ -965,7 +965,7 @@ class MainActivity : AppCompatActivity() {
         if (micOn && hasPermission(Manifest.permission.RECORD_AUDIO)) pending = pending.withAudioEnabled()
 
         recordingPaused = false
-        recording = pending.start(mainExecutor) { event ->
+        recording = pending.start(uiExecutor) { event ->
             when (event) {
                 is VideoRecordEvent.Start -> refreshUi()
                 is VideoRecordEvent.Status -> {
