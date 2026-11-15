@@ -8,7 +8,10 @@ the front and rear cameras record at the same time into a single video.
 **Dual / Vlog mode**
 - Both cameras recorded at once into one MP4, with sound
 - Layouts: **Picture-in-picture**, **Side by side**, **Top / bottom**, each camera cropped to fill its area
-- Full-width 9:16 frame in portrait, 16:9 in landscape
+- Frame shape: Auto (9:16 portrait / 16:9 landscape), 9:16, 4:5, 1:1 or 16:9
+- **Fill** (crop each camera to its area) or **Fit** (whole picture, no crop, over a blurred background)
+- Starts on the widest lens (e.g. 0.5x ultra-wide) for travel and bike vlogs
+- Tip: Side by side + 1:1 or 4:5 frame keeps almost all of both cameras with Fill
 - Picture-in-picture: move the inset to any corner, 3 sizes, swap which camera is the main one
 - Change layout, move the inset or swap cameras live, even while recording
 - Zoom each camera separately (the "Zoom: Rear/Front" button picks which one)

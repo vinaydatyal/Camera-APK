@@ -166,6 +166,8 @@ class MainActivity : AppCompatActivity() {
     private var dualSwapped = false
     private var dualZoomTarget = 0
     private var dualFullHd = false
+    private var dualFrame = DualFrame.AUTO
+    private var dualFit = false
 
     private var lastMediaUri: Uri? = null
     private var lastMediaIsVideo = false
@@ -311,6 +313,9 @@ class MainActivity : AppCompatActivity() {
         stabilizationOn = prefs.getBoolean("stab", true)
         timerSeconds = prefs.getInt("timer", 0)
         dualFullHd = prefs.getBoolean("dualFhd", false)
+        dualFit = prefs.getBoolean("dualFit", false)
+        dualFrame = runCatching { DualFrame.valueOf(prefs.getString("dualFrame", "AUTO")!!) }
+            .getOrDefault(DualFrame.AUTO)
         dualLayout = runCatching { DualLayout.valueOf(prefs.getString("dualLayout", "PIP")!!) }
             .getOrDefault(DualLayout.PIP)
         pipCorner = runCatching { PipCorner.valueOf(prefs.getString("pipCorner", "TOP_RIGHT")!!) }
@@ -328,6 +333,8 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("stab", stabilizationOn)
             .putInt("timer", timerSeconds)
             .putBoolean("dualFhd", dualFullHd)
+            .putBoolean("dualFit", dualFit)
+            .putString("dualFrame", dualFrame.name)
             .putString("dualLayout", dualLayout.name)
             .putString("pipCorner", pipCorner.name)
             .putInt("pipSize", pipSizeIndex)
@@ -374,7 +381,7 @@ class MainActivity : AppCompatActivity() {
         val rw = b.root.width
         val rh = b.root.height
         if (rw == 0 || rh == 0) return
-        val aspect = if (rw <= rh) 9f / 16f else 16f / 9f
+        val aspect = dualFrame.aspect(screenPortrait = rw <= rh)
         val (w, h) = if (rw.toFloat() / rh > aspect) (rh * aspect).roundToInt() to rh
         else rw to (rw / aspect).roundToInt()
         val lp = b.dualSurface.layoutParams as FrameLayout.LayoutParams
@@ -388,10 +395,10 @@ class MainActivity : AppCompatActivity() {
 
     /** Output size for dual recordings and snapshots, matching the on-screen frame. */
     private fun dualCanvasSize(): Pair<Int, Int> {
-        val long = if (dualFullHd) 1920 else 1280
         val short = if (dualFullHd) 1080 else 720
-        val portrait = b.dualSurface.height >= b.dualSurface.width
-        return if (portrait) short to long else long to short
+        val aspect = dualFrame.aspect(screenPortrait = b.root.width <= b.root.height)
+        fun even(v: Float) = (v / 2f).roundToInt() * 2
+        return if (aspect <= 1f) short to even(short / aspect) else even(short * aspect) to short
     }
 
     private fun applyDualSettings() {
@@ -401,6 +408,7 @@ class MainActivity : AppCompatActivity() {
             pipSize = DualComposer.PIP_SIZES[pipSizeIndex]
             swapped = dualSwapped
             mirrorFront = this@MainActivity.mirrorFront
+            fit = dualFit
         }
     }
 
@@ -603,6 +611,16 @@ class MainActivity : AppCompatActivity() {
         )
         dualCameras = concurrent.cameras
         dualPreviews = previews
+        // Start on the widest field of view (e.g. 0.5x ultra-wide) — best for travel/vlogs.
+        val bound = dualCameras
+        handler.postDelayed({
+            if (dualCameras !== bound) return@postDelayed
+            for (cam in bound) {
+                cam.cameraInfo.zoomState.value?.let { z ->
+                    if (z.minZoomRatio < 1f) cam.cameraControl.setZoomRatio(z.minZoomRatio)
+                }
+            }
+        }, 500)
         dualZoomTarget = dualZoomTarget.coerceIn(0, (dualCameras.size - 1).coerceAtLeast(0))
     }
 
@@ -855,6 +873,16 @@ class MainActivity : AppCompatActivity() {
             observeCamera(activeCamera())
             refreshUi()
         }
+        b.btnDualFrame.setOnClickListener {
+            dualFrame = DualFrame.entries[(dualFrame.ordinal + 1) % DualFrame.entries.size]
+            layoutDualSurface()
+            refreshUi()
+        }
+        b.btnDualFit.setOnClickListener {
+            dualFit = !dualFit
+            applyDualSettings()
+            refreshUi()
+        }
         b.btnDualQuality.setOnClickListener {
             dualFullHd = !dualFullHd
             refreshUi()
@@ -960,6 +988,11 @@ class MainActivity : AppCompatActivity() {
             else -> "Cam ${dualZoomTarget + 1}"
         }
         b.btnDualQuality.text = if (dualFullHd) "1080p" else "720p"
+        b.btnDualFrame.text = "▭ Frame " + dualFrame.label
+        b.btnDualFit.text = if (dualFit) "⤢ Fit (no crop)" else "⤢ Fill (crop)"
+        active(b.btnDualFit, dualFit)
+        b.btnDualFrame.isEnabled = !isRecording
+        b.btnDualFrame.alpha = if (isRecording) 0.4f else 1f
         // Layout, inset and swap can change live, even while recording.
         b.btnDualQuality.isEnabled = !isRecording
         b.btnDualQuality.alpha = if (isRecording) 0.4f else 1f

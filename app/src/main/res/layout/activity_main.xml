@@ -176,6 +176,8 @@
                 android:paddingBottom="4dp">
 
                 <TextView android:id="@+id/btnLayout" style="@style/Pill" />
+                <TextView android:id="@+id/btnDualFrame" style="@style/Pill" />
+                <TextView android:id="@+id/btnDualFit" style="@style/Pill" />
                 <TextView android:id="@+id/btnCorner" style="@style/Pill" android:text="Move inset" />
                 <TextView android:id="@+id/btnPipSize" style="@style/Pill" />
                 <TextView android:id="@+id/btnSwap" style="@style/Pill" android:text="⇄ Swap" />
