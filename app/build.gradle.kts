@@ -11,8 +11,15 @@ android {
         applicationId = "com.vlogcam.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // CI sets GITHUB_RUN_NUMBER so every build has a higher version than the last.
+        val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = build
+        versionName = "1.$build"
+        buildConfigField(
+            "String",
+            "UPDATE_BASE_URL",
+            "\"https://github.com/vinaydatyal/Camera-APK/releases/download/latest-build/\""
+        )
     }
 
     // Fixed personal signing key so new builds install as updates over old ones.
@@ -41,6 +48,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
     lint {
         checkReleaseBuilds = false

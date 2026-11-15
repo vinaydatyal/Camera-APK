@@ -33,7 +33,14 @@ Photos are saved to `Pictures/VlogCam`, videos to `Movies/VlogCam`, so they show
 2. Download `VlogCam.apk` and open it.
 3. If Android asks, allow your browser or file manager to install unknown apps.
 
-Each push to the repository rebuilds the APK automatically (see the **Actions** tab). New builds install as updates over the old one.
+Each push to the repository rebuilds the APK automatically (see the **Actions** tab).
+
+### Updates inside the app
+
+When a newer build is published, a yellow **"New version available · Tap to update"** banner
+appears on the camera screen. Tap it to download the update and confirm Android's install prompt.
+The first time, Android asks you to allow VlogCam to install apps. The app checks when it opens
+and again every 10 minutes while it's open.
 
 ## Requirements
 

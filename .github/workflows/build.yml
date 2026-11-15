@@ -25,6 +25,9 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
           cp app/build/outputs/apk/release/app-release.apk VlogCam.apk
+          MSG=$(git log -1 --pretty=%s)
+          python3 -c 'import json,os,sys; json.dump({"versionCode": int(os.environ["GITHUB_RUN_NUMBER"]), "versionName": "1." + os.environ["GITHUB_RUN_NUMBER"], "notes": sys.argv[1]}, open("version.json","w"))' "$MSG"
+          cat version.json
 
       - uses: actions/upload-artifact@v4
         with:
@@ -38,7 +41,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: VlogCam – latest build
           prerelease: true
-          files: VlogCam.apk
+          files: |
+            VlogCam.apk
+            version.json
           body: |
             Latest VlogCam build from commit ${{ github.sha }}.
             Download **VlogCam.apk** on your phone and open it to install

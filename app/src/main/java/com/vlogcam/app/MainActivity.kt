@@ -119,6 +119,13 @@ class MainActivity : AppCompatActivity() {
     private var countdownRunnable: Runnable? = null
     private var zoomSliderDragging = false
 
+    // In-app updates
+    private var availableUpdate: Updater.Update? = null
+    private var downloadedApk: java.io.File? = null
+    private var updateBusy = false
+    private var lastUpdateCheck = 0L
+    private var installAfterPermission = false
+
     private val permissions = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
 
     private val permissionLauncher =
@@ -173,6 +180,15 @@ class MainActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateTargetRotation()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (installAfterPermission && Updater.canInstall(this)) {
+            installAfterPermission = false
+            downloadedApk?.let { launchInstaller(it) }
+        }
+        if (System.currentTimeMillis() - lastUpdateCheck > 10 * 60 * 1000L) checkForUpdate()
     }
 
     override fun onPause() {
@@ -613,6 +629,7 @@ class MainActivity : AppCompatActivity() {
         b.btnSnapshot.setOnClickListener { takeDualSnapshot() }
         b.btnPause.setOnClickListener { togglePause() }
         b.thumbnail.setOnClickListener { openLastMedia() }
+        b.updateBanner.setOnClickListener { onUpdateBannerTapped() }
 
         b.tabPhoto.setOnClickListener { setMode(Mode.PHOTO) }
         b.tabVideo.setOnClickListener { setMode(Mode.VIDEO) }
@@ -1044,6 +1061,72 @@ class MainActivity : AppCompatActivity() {
             startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(this, "No gallery app found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // ---------------------------------------------------------------- updates
+
+    private fun checkForUpdate() {
+        if (updateBusy) return
+        lastUpdateCheck = System.currentTimeMillis()
+        ioExecutor.execute {
+            val update = Updater.check()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                availableUpdate = update
+                if (update != null && !updateBusy) {
+                    b.updateBanner.text = "⬆ New version ${update.versionName} available · Tap to update"
+                    b.updateBanner.visibility = View.VISIBLE
+                } else if (update == null) {
+                    b.updateBanner.visibility = View.GONE
+                }
+            }
+        }
+    }
+
+    private fun onUpdateBannerTapped() {
+        if (updateBusy) return
+        if (recording != null) {
+            Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        downloadedApk?.takeIf { it.exists() }?.let { launchInstaller(it); return }
+        updateBusy = true
+        b.updateBanner.text = "Downloading update…"
+        ioExecutor.execute {
+            val result = runCatching {
+                Updater.download(this) { pct ->
+                    runOnUiThread {
+                        b.updateBanner.text =
+                            if (pct >= 0) "Downloading update… $pct%" else "Downloading update…"
+                    }
+                }
+            }
+            runOnUiThread {
+                updateBusy = false
+                result.onSuccess { apk ->
+                    downloadedApk = apk
+                    b.updateBanner.text = "⬆ Update downloaded · Tap to install"
+                    launchInstaller(apk)
+                }.onFailure { e ->
+                    b.updateBanner.text = "⬆ Update failed · Tap to retry"
+                    Toast.makeText(this, "Update download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun launchInstaller(apk: java.io.File) {
+        if (!Updater.canInstall(this)) {
+            installAfterPermission = true
+            Toast.makeText(this, "Allow VlogCam to install updates, then come back", Toast.LENGTH_LONG).show()
+            runCatching { startActivity(Updater.permissionIntent(this)) }
+            return
+        }
+        try {
+            startActivity(Updater.installIntent(this, apk))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not open installer: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
