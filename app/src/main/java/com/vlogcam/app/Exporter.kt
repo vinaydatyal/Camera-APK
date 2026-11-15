@@ -21,6 +21,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
@@ -92,10 +93,128 @@ class Exporter(private val context: Context) {
         progressPoller?.let { main.removeCallbacks(it) }
     }
 
-    private fun fileName(preset: ExportPreset) =
-        MediaSaver.fileName(
-            "${preset.platform}_${preset.name}".replace(Regex("[^A-Za-z0-9]+"), "_").trim('_')
+    private fun fileName(preset: ExportPreset) = fileName("${preset.platform}_${preset.name}")
+
+    private fun fileName(tag: String) =
+        MediaSaver.fileName(tag.replace(Regex("[^A-Za-z0-9]+"), "_").trim('_'))
+
+    // ------------------------------------------------------------------ trim & join
+
+    /** Saves the part of [source] between [startMs] and [endMs] as a new video. */
+    fun trim(
+        source: Uri, startMs: Long, endMs: Long,
+        onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit,
+    ) {
+        cancelled = false
+        val item = EditedMediaItem.Builder(
+            MediaItem.Builder()
+                .setUri(source)
+                .setClippingConfiguration(
+                    MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(startMs)
+                        .setEndPositionMs(endMs)
+                        .build()
+                )
+                .build()
+        ).build()
+        // Fast path re-encodes only the first moments and copies the rest; fall back to a full re-encode.
+        runVideoJob(
+            "Trim",
+            configure = { it.experimentalSetTrimOptimizationEnabled(true) },
+            start = { t, out -> t.start(item, out) },
+            retry = {
+                runVideoJob("Trim", { it }, { t, out -> t.start(item, out) }, null, onProgress, onDone)
+            },
+            onProgress = onProgress, onDone = onDone,
         )
+    }
+
+    /** Joins [sources] (in order) into one video. */
+    fun join(sources: List<Uri>, onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit) {
+        cancelled = false
+        val items = sources.map { EditedMediaItem.Builder(MediaItem.fromUri(it)).build() }
+        val sequence = EditedMediaItemSequence(items)
+        // Our own ride parts share one format, so try copying without re-encoding first.
+        val fast = Composition.Builder(sequence).setTransmuxAudio(true).setTransmuxVideo(true).build()
+        val full = Composition.Builder(sequence).build()
+        runVideoJob(
+            "Joined",
+            configure = { it },
+            start = { t, out -> t.start(fast, out) },
+            retry = {
+                runVideoJob("Joined", { it }, { t, out -> t.start(full, out) }, null, onProgress, onDone)
+            },
+            onProgress = onProgress, onDone = onDone,
+        )
+    }
+
+    private fun runVideoJob(
+        tag: String,
+        configure: (Transformer.Builder) -> Transformer.Builder,
+        start: (Transformer, String) -> Unit,
+        retry: (() -> Unit)?,
+        onProgress: (Int) -> Unit,
+        onDone: (Uri?, String?) -> Unit,
+    ) {
+        val dir = File(context.cacheDir, "export").apply { mkdirs() }
+        val out = File(dir, "job_${System.currentTimeMillis()}.mp4")
+        val builder = Transformer.Builder(context)
+            .setVideoMimeType(MimeTypes.VIDEO_H264)
+            .setAudioMimeType(MimeTypes.AUDIO_AAC)
+            .addListener(object : Transformer.Listener {
+                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                    stopPolling()
+                    transformer = null
+                    io.execute {
+                        val uri = copyToMediaStore(out, fileName(tag))
+                        out.delete()
+                        main.post {
+                            if (uri != null) onDone(uri, null) else onDone(null, "Could not save the video")
+                        }
+                    }
+                }
+
+                override fun onError(
+                    composition: Composition,
+                    exportResult: ExportResult,
+                    exportException: ExportException,
+                ) {
+                    stopPolling()
+                    transformer = null
+                    out.delete()
+                    if (cancelled) return
+                    if (retry != null) retry()
+                    else onDone(null, exportException.message ?: "Failed")
+                }
+            })
+        val t = configure(builder).build()
+        transformer = t
+        try {
+            start(t, out.absolutePath)
+        } catch (e: Exception) {
+            transformer = null
+            if (retry != null) retry() else onDone(null, e.message ?: "Failed")
+            return
+        }
+        startPolling(onProgress)
+    }
+
+    private fun startPolling(onProgress: (Int) -> Unit) {
+        stopPolling()
+        val holder = ProgressHolder()
+        val poller = object : Runnable {
+            override fun run() {
+                val current = transformer ?: return
+                val state = current.getProgress(holder)
+                if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
+                    onProgress(if (state == Transformer.PROGRESS_STATE_AVAILABLE) holder.progress else -1)
+                }
+                main.postDelayed(this, 300)
+            }
+        }
+        progressPoller = poller
+        main.post(poller)
+    }
 
     // ------------------------------------------------------------------ video
 
@@ -128,7 +247,7 @@ class Exporter(private val context: Context) {
                     stopPolling()
                     transformer = null
                     io.execute {
-                        val uri = copyToMediaStore(out, preset)
+                        val uri = copyToMediaStore(out, fileName(preset))
                         out.delete()
                         main.post {
                             if (uri != null) onDone(uri, null) else onDone(null, "Could not save the video")
@@ -170,10 +289,10 @@ class Exporter(private val context: Context) {
         progressPoller = null
     }
 
-    private fun copyToMediaStore(file: File, preset: ExportPreset): Uri? {
+    private fun copyToMediaStore(file: File, name: String): Uri? {
         val resolver = context.contentResolver
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(preset) + ".mp4")
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "$name.mp4")
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies/${MediaSaver.FOLDER}/Exports")

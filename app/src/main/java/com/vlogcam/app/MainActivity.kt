@@ -208,6 +208,18 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
             if (uri != null) chooseExportPreset(uri)
         }
+    private val pickTrimVideo =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) showTrimDialog(uri)
+        }
+    private val pickJoinVideos =
+        registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+            when {
+                uris.isEmpty() -> Unit
+                uris.size < 2 -> Toast.makeText(this, "Pick at least 2 videos to join", Toast.LENGTH_SHORT).show()
+                else -> confirmJoin(uris)
+            }
+        }
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
@@ -1998,11 +2010,209 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------------------------------------------------------- export for social media
 
+    /** The ⇪ button: resize for social media, trim, or join ride parts. */
     private fun startExportFlow() {
         if (isRecording) {
             Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show()
             return
         }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Edit & export")
+            .setItems(
+                arrayOf(
+                    "📐  Resize for Instagram / YouTube / Facebook",
+                    "✂️  Trim a video",
+                    "🔗  Join ride parts into one video",
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> startResizeFlow()
+                    1 -> startTrimFlow()
+                    else -> pickJoinVideos.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                    )
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun startTrimFlow() {
+        val pick = {
+            pickTrimVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+        }
+        val last = lastMediaUri
+        if (last == null || !lastMediaIsVideo) { pick(); return }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Trim which video?")
+            .setItems(arrayOf("Last video", "Choose from gallery…")) { _, which ->
+                if (which == 0) showTrimDialog(last) else pick()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun formatMs(ms: Long): String {
+        val totalTenths = ms / 100
+        val m = totalTenths / 600
+        val sec = (totalTenths / 10) % 60
+        val t = totalTenths % 10
+        return String.format(Locale.US, "%d:%02d.%d", m, sec, t)
+    }
+
+    /** Preview + range slider to pick the part to keep. Saves a new file; the original is kept. */
+    private fun showTrimDialog(uri: Uri) {
+        val durationMs = runCatching {
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(this, uri)
+                r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong()
+            } finally {
+                r.release()
+            }
+        }.getOrNull()
+        if (durationMs == null || durationMs < 1000) {
+            Toast.makeText(this, "Can't read this video", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val dp = resources.displayMetrics.density
+        val video = android.widget.VideoView(this).apply {
+            setVideoURI(uri)
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, (260 * dp).toInt()
+            )
+            setOnPreparedListener { seekTo(1) }
+        }
+        val label = TextView(this).apply {
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 15f
+            setPadding(0, (12 * dp).toInt(), 0, 0)
+        }
+        val slider = com.google.android.material.slider.RangeSlider(this).apply {
+            valueFrom = 0f
+            valueTo = durationMs / 1000f
+            values = listOf(0f, durationMs / 1000f)
+            labelBehavior = com.google.android.material.slider.LabelFormatter.LABEL_GONE
+        }
+        val play = TextView(this).apply {
+            text = "▶  Preview selection"
+            setTextColor(0xFF000000.toInt())
+            setBackgroundResource(R.drawable.pill_bg_active)
+            gravity = Gravity.CENTER
+            setPadding((16 * dp).toInt(), (8 * dp).toInt(), (16 * dp).toInt(), (8 * dp).toInt())
+        }
+        fun startMs() = (slider.values[0] * 1000).toLong()
+        fun endMs() = (slider.values[1] * 1000).toLong()
+        fun updateLabel() {
+            label.text = "Keep ${formatMs(startMs())} → ${formatMs(endMs())}   (${formatMs(endMs() - startMs())})"
+        }
+        updateLabel()
+        val stopAtEnd = object : Runnable {
+            override fun run() {
+                if (!video.isPlaying) return
+                if (video.currentPosition >= endMs()) video.pause() else handler.postDelayed(this, 100)
+            }
+        }
+        slider.addOnChangeListener(com.google.android.material.slider.RangeSlider.OnChangeListener { s, _, fromUser ->
+            updateLabel()
+            if (fromUser) {
+                video.pause()
+                val thumb = s.focusedThumbIndex.coerceIn(0, 1)
+                video.seekTo((s.values[thumb] * 1000).toInt())
+            }
+        })
+        play.setOnClickListener {
+            video.seekTo(startMs().toInt())
+            video.start()
+            handler.postDelayed(stopAtEnd, 100)
+        }
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (20 * dp).toInt()
+            setPadding(pad, (8 * dp).toInt(), pad, 0)
+            addView(video)
+            addView(label)
+            addView(slider)
+            addView(play, android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Trim video")
+            .setView(box)
+            .setPositiveButton("Save trimmed copy") { _, _ ->
+                val start = startMs()
+                val end = endMs()
+                if (end - start < 500) {
+                    Toast.makeText(this, "Selection is too short", Toast.LENGTH_SHORT).show()
+                } else {
+                    runVideoJob("Trimming") { progress, done -> exporter.trim(uri, start, end, progress, done) }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .setOnDismissListener {
+                handler.removeCallbacks(stopAtEnd)
+                video.stopPlayback()
+            }
+            .show()
+    }
+
+    private fun displayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    }.getOrNull()
+
+    /** Orders the picked parts by file name (our files are named by date/time) and confirms. */
+    private fun confirmJoin(picked: List<Uri>) {
+        val named = picked.map { it to (displayName(it) ?: "") }
+        val ordered = if (named.all { it.second.isNotEmpty() }) named.sortedBy { it.second } else named
+        val list = ordered.mapIndexed { i, (_, name) -> "${i + 1}. ${name.ifEmpty { "Video ${i + 1}" }}" }
+            .joinToString("\n")
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Join ${ordered.size} videos in this order?")
+            .setMessage(list)
+            .setPositiveButton("Join") { _, _ ->
+                val uris = ordered.map { it.first }
+                runVideoJob("Joining") { progress, done -> exporter.join(uris, progress, done) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Shows a progress dialog for a trim/join job, then the result options. */
+    private fun runVideoJob(
+        title: String,
+        start: (onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit) -> Unit,
+    ) {
+        val progress = MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setMessage("Starting…")
+            .setCancelable(false)
+            .setNegativeButton("Cancel") { _, _ -> exporter.cancel() }
+            .create()
+        progress.show()
+        start({ p -> progress.setMessage(if (p >= 0) "$title… $p%" else "$title…") }) { out, error ->
+            if (progress.isShowing) progress.dismiss()
+            if (isFinishing || isDestroyed) return@start
+            if (out == null) {
+                if (error != null) Toast.makeText(this, "$title failed: $error", Toast.LENGTH_LONG).show()
+                return@start
+            }
+            lastMediaUri = out
+            lastMediaIsVideo = true
+            setLastMedia(out, true)
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Done")
+                .setMessage("Saved to Movies/VlogCam/Exports. The original files are unchanged.")
+                .setPositiveButton("Share") { _, _ -> shareMedia(out, true) }
+                .setNeutralButton("Resize for…") { _, _ -> chooseExportPreset(out) }
+                .setNegativeButton("Done", null)
+                .show()
+        }
+    }
+
+    private fun startResizeFlow() {
         val pick = {
             pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
         }

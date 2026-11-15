@@ -57,6 +57,13 @@ the front and rear cameras record at the same time into a single video.
 - **📍 Speed overlay** (Dual/Vlog mode): live GPS speed (km/h), trip distance for the current recording,
   time and place name, burned into the video, preview and snapshots. Move it to any corner.
 
+**Edit & export (⇪ button)**
+- **✂️ Trim:** preview the video, drag the two handles to choose the part to keep, preview the selection,
+  and save a trimmed copy (fast: only the first moments are re-encoded; the original is kept).
+- **🔗 Join ride parts:** pick the 10-minute parts of a ride; they're put in time order and joined into
+  one video (copied without re-encoding when possible, so it's quick and lossless).
+- After trimming or joining you can **Share** straight away or **Resize for…** a platform.
+
 **Export for social media**
 - Tap the **⇪** button next to the gallery thumbnail (or long-press the thumbnail)
 - Pick the last capture or any photo/video from your gallery
