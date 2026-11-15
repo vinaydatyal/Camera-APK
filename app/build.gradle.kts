@@ -17,7 +17,7 @@ android {
         versionName = "1.$build"
         // Phones only: skip x86 emulator libraries (keeps the APK much smaller).
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            abiFilters += listOf("arm64-v8a")
         }
         buildConfigField(
             "String",
@@ -53,6 +53,12 @@ android {
     buildFeatures {
         viewBinding = true
         buildConfig = true
+    }
+    // Compress native libraries inside the APK (smaller download).
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
     lint {
         checkReleaseBuilds = false
