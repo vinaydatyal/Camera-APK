@@ -7,8 +7,10 @@ the front and rear cameras record at the same time into a single video.
 
 **Dual / Vlog mode**
 - Both cameras recorded at once into one MP4, with sound
-- Layouts: **Picture-in-picture**, **Side by side**, **Top / bottom**
+- Layouts: **Picture-in-picture**, **Side by side**, **Top / bottom**, each camera cropped to fill its area
+- Full-width 9:16 frame in portrait, 16:9 in landscape
 - Picture-in-picture: move the inset to any corner, 3 sizes, swap which camera is the main one
+- Change layout, move the inset or swap cameras live, even while recording
 - Zoom each camera separately (the "Zoom: Rear/Front" button picks which one)
 - Stabilization (when the phone supports it), 720p / 1080p
 - Dual snapshot button for still photos of the combined view (also works while recording)
@@ -23,7 +25,7 @@ the front and rear cameras record at the same time into a single video.
 - Night / HDR / Portrait / Retouch photo modes when the phone's manufacturer provides them
 - Exposure compensation, rule-of-thirds grid, 3s / 10s self-timer, mirrored selfies
 - Volume buttons act as the shutter
-- Works in portrait and landscape
+- Works in portrait and landscape and follows the phone's auto-rotate setting
 
 Photos are saved to `Pictures/VlogCam`, videos to `Movies/VlogCam`, so they show up in your gallery.
 

@@ -19,7 +19,12 @@ import android.util.Size
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.OrientationEventListener
 import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.widget.FrameLayout
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
@@ -37,6 +42,8 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.MirrorMode
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
+import android.content.ContentValues
+import android.media.MediaRecorder
 import androidx.camera.core.ZoomState
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
@@ -87,6 +94,50 @@ class MainActivity : AppCompatActivity() {
     private var recording: Recording? = null
     private var recordingPaused = false
     private var dualOwner: DisposableLifecycleOwner? = null
+    private var dualRenderer: DualRenderer? = null
+    private var dualPreviews: List<Preview> = emptyList()
+
+    // Dual-mode recording (MediaRecorder fed by the GL renderer)
+    private var mediaRecorder: android.media.MediaRecorder? = null
+    private var dualPfd: android.os.ParcelFileDescriptor? = null
+    private var dualUri: Uri? = null
+    private var dualStartMs = 0L
+    private var dualPausedMs = 0L
+    private var dualPauseStartMs = 0L
+    private var dualStopping = false
+    private val isRecording get() = recording != null || mediaRecorder != null || dualStopping
+
+    // Physical orientation, used for photo/video rotation even when auto-rotate is off.
+    private var deviceRotation = Surface.ROTATION_0
+    private val orientationListener by lazy {
+        object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                val rot = when (orientation) {
+                    in 45 until 135 -> Surface.ROTATION_270
+                    in 135 until 225 -> Surface.ROTATION_180
+                    in 225 until 315 -> Surface.ROTATION_90
+                    else -> Surface.ROTATION_0
+                }
+                if (rot != deviceRotation) {
+                    deviceRotation = rot
+                    imageCapture?.targetRotation = rot
+                    if (recording == null) videoCapture?.targetRotation = rot
+                }
+            }
+        }
+    }
+    private val dualTicker = object : Runnable {
+        override fun run() {
+            if (mediaRecorder == null) return
+            val now = System.currentTimeMillis()
+            val paused = dualPausedMs + if (recordingPaused) now - dualPauseStartMs else 0L
+            val secs = (now - dualStartMs - paused) / 1000
+            val dot = if (recordingPaused) "❚❚" else "●"
+            b.recordTime.text = String.format(Locale.US, "%s %02d:%02d", dot, secs / 60, secs % 60)
+            handler.postDelayed(this, 500)
+        }
+    }
     private var observedCamera: Camera? = null
     private var stabilizationSupported = false
     private var stabilizationActive = false
@@ -166,6 +217,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         loadPrefs()
+        dualRenderer = DualRenderer()
+        applyDualSettings()
+        b.dualSurface.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {}
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                dualRenderer?.setDisplaySurface(holder.surface, width, height)
+            }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                dualRenderer?.setDisplaySurface(null, 0, 0)
+            }
+        })
+        b.root.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob ->
+            if (r - l != or - ol || bt - t != ob - ot) b.root.post { layoutDualSurface() }
+        }
         setupControls()
         setupGestures()
         refreshUi()
@@ -184,6 +249,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        orientationListener.enable()
         if (installAfterPermission && Updater.canInstall(this)) {
             installAfterPermission = false
             downloadedApk?.let { launchInstaller(it) }
@@ -193,12 +259,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        orientationListener.disable()
         savePrefs()
         cancelCountdown()
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (mediaRecorder != null) stopDualRecording()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        dualRenderer?.release()
+        dualRenderer = null
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .unregisterDisplayListener(displayListener)
         recording?.stop()
@@ -279,14 +353,53 @@ class MainActivity : AppCompatActivity() {
     private fun updateTargetRotation() {
         val rotation = displayRotation()
         preview?.targetRotation = rotation
-        imageCapture?.targetRotation = rotation
-        if (recording == null) videoCapture?.targetRotation = rotation
+        imageCapture?.targetRotation = deviceRotation
+        if (recording == null) videoCapture?.targetRotation = deviceRotation
+        if (mediaRecorder == null) dualPreviews.forEach { it.targetRotation = rotation }
+        dualRenderer?.displayRotationDeg = rotation * 90
+        layoutDualSurface()
+    }
+
+    /** Sizes the dual SurfaceView to the recording aspect (9:16 or 16:9), as large as fits. */
+    private fun layoutDualSurface() {
+        if (mode != Mode.DUAL || mediaRecorder != null) return
+        val rw = b.root.width
+        val rh = b.root.height
+        if (rw == 0 || rh == 0) return
+        val aspect = if (rw <= rh) 9f / 16f else 16f / 9f
+        val (w, h) = if (rw.toFloat() / rh > aspect) (rh * aspect).roundToInt() to rh
+        else rw to (rw / aspect).roundToInt()
+        val lp = b.dualSurface.layoutParams as FrameLayout.LayoutParams
+        if (lp.width != w || lp.height != h || lp.gravity != Gravity.CENTER) {
+            lp.width = w
+            lp.height = h
+            lp.gravity = Gravity.CENTER
+            b.dualSurface.layoutParams = lp
+        }
+    }
+
+    /** Output size for dual recordings and snapshots, matching the on-screen frame. */
+    private fun dualCanvasSize(): Pair<Int, Int> {
+        val long = if (dualFullHd) 1920 else 1280
+        val short = if (dualFullHd) 1080 else 720
+        val portrait = b.dualSurface.height >= b.dualSurface.width
+        return if (portrait) short to long else long to short
+    }
+
+    private fun applyDualSettings() {
+        dualRenderer?.apply {
+            layout = dualLayout
+            corner = pipCorner
+            pipSize = DualComposer.PIP_SIZES[pipSizeIndex]
+            swapped = dualSwapped
+            mirrorFront = this@MainActivity.mirrorFront
+        }
     }
 
     /** (Re)binds use cases for the current mode. */
     private fun bindCamera() {
         val provider = cameraProvider ?: return
-        if (recording != null) return
+        if (isRecording) return
         observedCamera?.cameraInfo?.zoomState?.removeObservers(this)
         observedCamera = null
 
@@ -337,6 +450,7 @@ class MainActivity : AppCompatActivity() {
         imageCapture = null
         videoCapture = null
         stabilizationActive = false
+        dualPreviews = emptyList()
         // Drop the cached dual session so the next bind uses the current layout.
         dualOwner?.destroy()
         dualOwner = null
@@ -357,6 +471,8 @@ class MainActivity : AppCompatActivity() {
         val previewStabSupported =
             runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported }.getOrDefault(false)
 
+        b.dualSurface.visibility = View.GONE
+        b.previewView.visibility = View.VISIBLE
         b.previewView.implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         b.previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
 
@@ -375,7 +491,7 @@ class MainActivity : AppCompatActivity() {
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(photoFlash)
                 .setResolutionSelector(resolution)
-                .setTargetRotation(rotation)
+                .setTargetRotation(deviceRotation)
                 .build()
             val em = extensionsManager
             val bindSelector = if (em != null && extensionMode != ExtensionMode.NONE &&
@@ -405,7 +521,7 @@ class MainActivity : AppCompatActivity() {
             stabilizationActive = allowStab && stabilizationOn && stabilizationSupported
 
             val vcBuilder = VideoCapture.Builder(recorder)
-                .setTargetRotation(rotation)
+                .setTargetRotation(deviceRotation)
                 .setMirrorMode(
                     if (mirrorFront) MirrorMode.MIRROR_MODE_ON_FRONT_ONLY else MirrorMode.MIRROR_MODE_OFF
                 )
@@ -428,6 +544,7 @@ class MainActivity : AppCompatActivity() {
     private class DualUnsupportedException : Exception()
 
     private fun bindDual(provider: ProcessCameraProvider, allowStab: Boolean) {
+        val renderer = dualRenderer ?: throw IllegalStateException("Renderer not ready")
         val pairs = provider.availableConcurrentCameraInfos
         if (pairs.isEmpty()) throw DualUnsupportedException()
         val pair = pairs.firstOrNull { list ->
@@ -437,48 +554,47 @@ class MainActivity : AppCompatActivity() {
         if (pair.size < 2) throw DualUnsupportedException()
         val back = pair.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK } ?: pair[0]
         val other = pair.first { it !== back }
-        val (primaryInfo, secondaryInfo) = if (dualSwapped) other to back else back to other
+        val infos = listOf(back, other)
 
-        b.previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        b.previewView.scaleType = PreviewView.ScaleType.FIT_CENTER
+        b.previewView.visibility = View.GONE
+        b.dualSurface.visibility = View.VISIBLE
+        layoutDualSurface()
 
         val rotation = displayRotation()
         val resolution = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
             .build()
-        val p = Preview.Builder()
-            .setResolutionSelector(resolution)
-            .setTargetRotation(rotation)
-            .build()
-        val quality = if (dualFullHd) Quality.FHD else Quality.HD
-        val recorder = Recorder.Builder()
-            .setQualitySelector(
-                QualitySelector.from(quality, FallbackStrategy.lowerQualityOrHigherThan(Quality.SD))
-            )
-            .build()
-        val caps = runCatching { Recorder.getVideoCapabilities(primaryInfo) }.getOrNull()
-        stabilizationSupported = caps?.isStabilizationSupported == true
-        stabilizationActive = allowStab && stabilizationOn && stabilizationSupported
-        val vcBuilder = VideoCapture.Builder(recorder).setTargetRotation(rotation)
-        if (stabilizationActive) vcBuilder.setVideoStabilizationEnabled(true)
-        val vc = vcBuilder.build()
+        val stabSupported = infos.all {
+            runCatching { Preview.getPreviewCapabilities(it).isStabilizationSupported }.getOrDefault(false)
+        }
+        stabilizationSupported = stabSupported
+        stabilizationActive = allowStab && stabilizationOn && stabSupported
 
-        val group = UseCaseGroup.Builder().addUseCase(p).addUseCase(vc).build()
-        val (primarySettings, secondarySettings) =
-            DualComposer.settings(dualLayout, pipCorner, DualComposer.PIP_SIZES[pipSizeIndex])
+        val previews = infos.mapIndexed { slot, info ->
+            renderer.setFront(slot, info.lensFacing == CameraSelector.LENS_FACING_FRONT)
+            Preview.Builder()
+                .setResolutionSelector(resolution)
+                .setTargetRotation(rotation)
+                .apply { if (stabilizationActive) setPreviewStabilizationEnabled(true) }
+                .build()
+                .also { it.setSurfaceProvider(renderer.surfaceProvider(slot)) }
+        }
+        renderer.displayRotationDeg = rotation * 90
+        applyDualSettings()
 
-        p.setSurfaceProvider(b.previewView.surfaceProvider)
         val owner = DisposableLifecycleOwner(this)
         dualOwner = owner
         val concurrent = provider.bindToLifecycle(
-            listOf(
-                SingleCameraConfig(primaryInfo.cameraSelector, group, primarySettings, owner),
-                SingleCameraConfig(secondaryInfo.cameraSelector, group, secondarySettings, owner),
-            )
+            infos.mapIndexed { slot, info ->
+                SingleCameraConfig(
+                    info.cameraSelector,
+                    UseCaseGroup.Builder().addUseCase(previews[slot]).build(),
+                    owner
+                )
+            }
         )
         dualCameras = concurrent.cameras
-        preview = p
-        videoCapture = vc
+        dualPreviews = previews
         dualZoomTarget = dualZoomTarget.coerceIn(0, (dualCameras.size - 1).coerceAtLeast(0))
     }
 
@@ -682,6 +798,7 @@ class MainActivity : AppCompatActivity() {
         }
         b.btnMirror.setOnClickListener {
             mirrorFront = !mirrorFront
+            applyDualSettings()
             if (mode == Mode.VIDEO) bindCamera() else refreshUi()
         }
         b.btnExposure.setOnClickListener {
@@ -708,15 +825,18 @@ class MainActivity : AppCompatActivity() {
         // Dual controls
         b.btnLayout.setOnClickListener {
             dualLayout = DualLayout.entries[(dualLayout.ordinal + 1) % DualLayout.entries.size]
-            bindCamera()
+            applyDualSettings()
+            refreshUi()
         }
         b.btnCorner.setOnClickListener {
             pipCorner = PipCorner.entries[(pipCorner.ordinal + 1) % PipCorner.entries.size]
-            bindCamera()
+            applyDualSettings()
+            refreshUi()
         }
         b.btnPipSize.setOnClickListener {
             pipSizeIndex = (pipSizeIndex + 1) % DualComposer.PIP_SIZES.size
-            bindCamera()
+            applyDualSettings()
+            refreshUi()
         }
         b.btnSwap.setOnClickListener { switchCamera() }
         b.btnZoomTarget.setOnClickListener {
@@ -727,12 +847,12 @@ class MainActivity : AppCompatActivity() {
         }
         b.btnDualQuality.setOnClickListener {
             dualFullHd = !dualFullHd
-            bindCamera()
+            refreshUi()
         }
     }
 
     private fun setMode(newMode: Mode) {
-        if (recording != null || mode == newMode) return
+        if (isRecording || mode == newMode) return
         cancelCountdown()
         mode = newMode
         torchOn = false
@@ -744,10 +864,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchCamera() {
-        if (recording != null) return
+        if (isRecording && mode != Mode.DUAL) return
         if (mode == Mode.DUAL) {
             dualSwapped = !dualSwapped
-            dualZoomTarget = 0
+            dualZoomTarget = if (dualSwapped) 1 else 0
+            applyDualSettings()
+            observeCamera(activeCamera())
+            b.btnSwitch.animate().rotationBy(180f).setDuration(250).start()
+            refreshUi()
+            return
         } else {
             lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
                 CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
@@ -758,7 +883,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshUi() {
-        val isRecording = recording != null
         val single = mode != Mode.DUAL
 
         fun tab(v: TextView, selected: Boolean) {
@@ -806,7 +930,7 @@ class MainActivity : AppCompatActivity() {
         active(b.btnMic, micOn)
 
         b.btnMirror.visibility =
-            if (single && lensFacing == CameraSelector.LENS_FACING_FRONT) View.VISIBLE else View.GONE
+            if (!single || lensFacing == CameraSelector.LENS_FACING_FRONT) View.VISIBLE else View.GONE
         b.btnMirror.text = if (mirrorFront) "⇋ Mirror On" else "⇋ Mirror Off"
         active(b.btnMirror, mirrorFront)
 
@@ -826,10 +950,9 @@ class MainActivity : AppCompatActivity() {
             else -> "Cam ${dualZoomTarget + 1}"
         }
         b.btnDualQuality.text = if (dualFullHd) "1080p" else "720p"
-        for (v in listOf(b.btnLayout, b.btnCorner, b.btnPipSize, b.btnSwap, b.btnDualQuality)) {
-            v.isEnabled = !isRecording
-            v.alpha = if (isRecording) 0.4f else 1f
-        }
+        // Layout, inset and swap can change live, even while recording.
+        b.btnDualQuality.isEnabled = !isRecording
+        b.btnDualQuality.alpha = if (isRecording) 0.4f else 1f
         for (v in listOf(b.btnStab, b.btnQuality, b.btnEffect, b.btnMic, b.btnMirror)) {
             v.isEnabled = !isRecording
         }
@@ -844,8 +967,9 @@ class MainActivity : AppCompatActivity() {
         b.btnSnapshot.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
         b.btnPause.visibility = if (isRecording) View.VISIBLE else View.GONE
         b.btnPause.text = if (recordingPaused) "▶" else "❚❚"
-        b.btnSwitch.isEnabled = !isRecording
-        b.btnSwitch.alpha = if (isRecording) 0.4f else 1f
+        val switchLocked = isRecording && mode != Mode.DUAL
+        b.btnSwitch.isEnabled = !switchLocked
+        b.btnSwitch.alpha = if (switchLocked) 0.4f else 1f
         b.recordTime.visibility = if (isRecording) View.VISIBLE else View.GONE
     }
 
@@ -885,7 +1009,8 @@ class MainActivity : AppCompatActivity() {
         if (countdownRunnable != null) { cancelCountdown(); return }
         when (mode) {
             Mode.PHOTO -> withTimer { takePhoto() }
-            Mode.VIDEO, Mode.DUAL -> if (recording == null) withTimer { startRecording() } else stopRecording()
+            Mode.VIDEO -> if (!isRecording) withTimer { startRecording() } else stopRecording()
+            Mode.DUAL -> if (!isRecording) withTimer { startDualRecording() } else stopDualRecording()
         }
     }
 
@@ -938,42 +1063,128 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    /** Dual photo: grab the composed preview frame (exactly what's on screen). */
+    /** Dual photo: render the combined frame offscreen at full output size. */
     private fun takeDualSnapshot() {
-        val bmp = b.previewView.bitmap
-        if (bmp == null) {
-            Toast.makeText(this, "Preview not ready", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val cropped = cropToContent(bmp)
+        val renderer = dualRenderer ?: return
+        val (w, h) = dualCanvasSize()
         flashScreen()
-        ioExecutor.execute {
-            val uri = MediaSaver.saveBitmap(this, cropped, MediaSaver.fileName("DUAL"))
-            runOnUiThread {
-                if (uri != null) setLastMedia(uri, false)
-                else Toast.makeText(this, "Could not save photo", Toast.LENGTH_SHORT).show()
+        renderer.snapshot(w, h) { bmp ->
+            if (bmp == null) {
+                runOnUiThread { Toast.makeText(this, "Snapshot failed", Toast.LENGTH_SHORT).show() }
+                return@snapshot
+            }
+            ioExecutor.execute {
+                val uri = MediaSaver.saveBitmap(this, bmp, MediaSaver.fileName("DUAL"))
+                runOnUiThread {
+                    if (uri != null) setLastMedia(uri, false)
+                    else Toast.makeText(this, "Could not save photo", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
 
-    /** Removes the letterbox bars that FIT_CENTER adds around the stream. */
-    private fun cropToContent(bmp: Bitmap): Bitmap {
-        val info = preview?.resolutionInfo ?: return bmp
-        val rot = info.rotationDegrees
-        var w = info.resolution.width.toFloat()
-        var h = info.resolution.height.toFloat()
-        if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
-        val vw = bmp.width.toFloat()
-        val vh = bmp.height.toFloat()
-        if (w <= 0f || h <= 0f) return bmp
-        val srcAspect = w / h
-        val (cw, ch) = if (vw / vh > srcAspect) (vh * srcAspect) to vh else vw to (vw / srcAspect)
-        val left = ((vw - cw) / 2f).roundToInt().coerceAtLeast(0)
-        val top = ((vh - ch) / 2f).roundToInt().coerceAtLeast(0)
-        val width = cw.roundToInt().coerceAtMost(bmp.width - left)
-        val height = ch.roundToInt().coerceAtMost(bmp.height - top)
-        if (width <= 0 || height <= 0) return bmp
-        return Bitmap.createBitmap(bmp, left, top, width, height)
+    // ---------------------------------------------------------------- dual recording
+
+    private fun startDualRecording() {
+        val renderer = dualRenderer ?: return
+        if (dualCameras.isEmpty()) return
+        val (w, h) = dualCanvasSize()
+        val values = MediaSaver.videoValues(MediaSaver.fileName("VLOG"))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+        val pfd = uri?.let { runCatching { contentResolver.openFileDescriptor(it, "w") }.getOrNull() }
+        if (uri == null || pfd == null) {
+            uri?.let { contentResolver.delete(it, null, null) }
+            Toast.makeText(this, "Could not create video file", Toast.LENGTH_LONG).show()
+            return
+        }
+        val audio = micOn && hasPermission(Manifest.permission.RECORD_AUDIO)
+        val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this)
+        else @Suppress("DEPRECATION") MediaRecorder()
+        try {
+            if (audio) mr.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+            mr.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            mr.setOutputFile(pfd.fileDescriptor)
+            mr.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            mr.setVideoSize(w, h)
+            mr.setVideoFrameRate(30)
+            mr.setVideoEncodingBitRate(if (dualFullHd) 16_000_000 else 8_000_000)
+            if (audio) {
+                mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                mr.setAudioSamplingRate(48_000)
+                mr.setAudioEncodingBitRate(128_000)
+                mr.setAudioChannels(1)
+            }
+            mr.prepare()
+            val surface = mr.surface
+            mr.start()
+            renderer.startEncoder(surface, w, h, displayRotation() * 90)
+        } catch (e: Exception) {
+            Log.e(TAG, "Dual recording failed to start", e)
+            runCatching { renderer.stopEncoder() }
+            mr.release()
+            runCatching { pfd.close() }
+            contentResolver.delete(uri, null, null)
+            Toast.makeText(this, "Could not start recording: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+        mediaRecorder = mr
+        dualPfd = pfd
+        dualUri = uri
+        recordingPaused = false
+        dualStartMs = System.currentTimeMillis()
+        dualPausedMs = 0L
+        b.recordTime.text = "● 00:00"
+        handler.post(dualTicker)
+        refreshUi()
+    }
+
+    private fun stopDualRecording() {
+        val mr = mediaRecorder ?: return
+        val pfd = dualPfd
+        val uri = dualUri
+        dualStopping = true
+        mediaRecorder = null
+        dualPfd = null
+        dualUri = null
+        handler.removeCallbacks(dualTicker)
+        refreshUi()
+        // Stop feeding frames first, then finalize the file off the main thread.
+        dualRenderer?.stopEncoder()
+        ioExecutor.execute {
+            val ok = try {
+                mr.stop()
+                true
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "MediaRecorder stop failed", e)
+                false
+            }
+            mr.release()
+            runCatching { pfd?.close() }
+            if (uri != null) {
+                if (ok) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        contentResolver.update(uri, ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }, null, null)
+                    }
+                } else {
+                    contentResolver.delete(uri, null, null)
+                }
+            }
+            runOnUiThread {
+                dualStopping = false
+                recordingPaused = false
+                b.recordTime.text = "● 00:00"
+                if (ok && uri != null) setLastMedia(uri, true)
+                else Toast.makeText(this, "Recording too short or failed", Toast.LENGTH_SHORT).show()
+                updateTargetRotation()
+                refreshUi()
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -1021,6 +1232,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun togglePause() {
+        mediaRecorder?.let { mr ->
+            runCatching {
+                if (recordingPaused) {
+                    mr.resume()
+                    dualPausedMs += System.currentTimeMillis() - dualPauseStartMs
+                } else {
+                    mr.pause()
+                    dualPauseStartMs = System.currentTimeMillis()
+                }
+                recordingPaused = !recordingPaused
+            }
+            refreshUi()
+            return
+        }
         val r = recording ?: return
         if (recordingPaused) r.resume() else r.pause()
     }
@@ -1086,7 +1311,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onUpdateBannerTapped() {
         if (updateBusy) return
-        if (recording != null) {
+        if (isRecording) {
             Toast.makeText(this, "Stop recording first", Toast.LENGTH_SHORT).show()
             return
         }
