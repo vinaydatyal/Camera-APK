@@ -491,6 +491,7 @@ class DualRenderer {
                     drawStream(second, secondIdx, x, y, pw, ph, rotationDeg)
                 }
             }
+            DualLayout.SOLO -> drawSlot(main ?: second, if (main != null) mainIdx else secondIdx, 0, 0, w, h, rotationDeg, useFit)
             DualLayout.SIDE_BY_SIDE, DualLayout.SPLIT_CARD -> {
                 val half = w / 2
                 drawSlot(main, mainIdx, 0, 0, half, h, rotationDeg, useFit)

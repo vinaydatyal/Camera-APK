@@ -396,6 +396,8 @@ class MainActivity : AppCompatActivity() {
     private var overlayCorner = PipCorner.BOTTOM_LEFT
     private var bluetoothMicActive = false
     private var dualHasAudio = false
+    private var dualNextUri: Uri? = null
+    private var dualNextPfd: android.os.ParcelFileDescriptor? = null
     private val windFilter by lazy {
         WindFilter(this) { _, ok ->
             if (ok) Toast.makeText(this, "🌬 Wind noise reduced", Toast.LENGTH_SHORT).show()
@@ -727,10 +729,11 @@ class MainActivity : AppCompatActivity() {
                 clearBound()
                 Toast.makeText(
                     this,
-                    "This phone doesn't allow two cameras at once. Switched to video.",
+                    "This phone doesn't allow two cameras at once. Using rear camera only.",
                     Toast.LENGTH_LONG
                 ).show()
-                mode = Mode.VIDEO
+                dualLayout = DualLayout.SOLO
+                dualSwapped = false
                 bindCamera()
                 return
             } catch (e: Exception) {
@@ -860,6 +863,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindDual(provider: ProcessCameraProvider, allowStab: Boolean) {
         val renderer = dualRenderer ?: throw IllegalStateException("Renderer not ready")
+        if (dualLayout == DualLayout.SOLO) {
+            bindSolo(provider, allowStab, renderer)
+            return
+        }
         val pairs = provider.availableConcurrentCameraInfos
         if (pairs.isEmpty()) throw DualUnsupportedException()
         val pair = pairs.firstOrNull { list ->
@@ -943,6 +950,53 @@ class MainActivity : AppCompatActivity() {
             }
         }, 500)
         dualZoomTarget = dualZoomTarget.coerceIn(0, (dualCameras.size - 1).coerceAtLeast(0))
+    }
+
+    /** Vlog pipeline with just one camera (rear by default; Swap picks the front). */
+    private fun bindSolo(provider: ProcessCameraProvider, allowStab: Boolean, renderer: DualRenderer) {
+        val facing = if (dualSwapped) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+        val info = provider.availableCameraInfos.firstOrNull { it.lensFacing == facing }
+            ?: provider.availableCameraInfos.first()
+        val front = info.lensFacing == CameraSelector.LENS_FACING_FRONT
+        val slot = if (front) 1 else 0
+        renderer.setFront(0, false)
+        renderer.setFront(1, true)
+
+        b.previewView.visibility = View.GONE
+        b.dualSurface.visibility = View.VISIBLE
+        layoutDualSurface()
+
+        val rotation = displayRotation()
+        stabilizationSupported =
+            runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported }.getOrDefault(false)
+        stabilizationActive = allowStab && stabilizationOn && stabilizationSupported
+        val p = Preview.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    .build()
+            )
+            .setTargetRotation(rotation)
+            .apply { if (stabilizationActive) setPreviewStabilizationEnabled(true) }
+            .build()
+        p.setSurfaceProvider(renderer.surfaceProvider(slot))
+        renderer.displayRotationDeg = rotation * 90
+        renderer.clearMask()
+        applyDualSettings()
+        renderer.swapped = slot == 1
+
+        val owner = DisposableLifecycleOwner(this)
+        dualOwner = owner
+        val cam = provider.bindToLifecycle(owner, info.cameraSelector, p)
+        dualCameras = listOf(cam)
+        dualPreviews = listOf(p)
+        dualZoomTarget = 0
+        handler.postDelayed({
+            if (dualCameras.firstOrNull() !== cam) return@postDelayed
+            cam.cameraInfo.zoomState.value?.let { z ->
+                if (z.minZoomRatio < 1f) cam.cameraControl.setZoomRatio(z.minZoomRatio)
+            }
+        }, 500)
     }
 
     private fun refreshExtensionModes(selector: CameraSelector) {
@@ -1229,15 +1283,18 @@ class MainActivity : AppCompatActivity() {
             var next = DualLayout.entries[(old.ordinal + 1) % DualLayout.entries.size]
             if (isRecording) {
                 // Cutout needs the camera set up differently, so it can't be toggled mid-recording.
-                if (old == DualLayout.CUTOUT) {
-                    Toast.makeText(this, "Stop recording to leave Cutout", Toast.LENGTH_SHORT).show()
+                if (old == DualLayout.CUTOUT || old == DualLayout.SOLO) {
+                    Toast.makeText(this, "Stop recording to change this layout", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                if (next == DualLayout.CUTOUT) next = DualLayout.entries[(next.ordinal + 1) % DualLayout.entries.size]
+                while (next == DualLayout.CUTOUT || next == DualLayout.SOLO) {
+                    next = DualLayout.entries[(next.ordinal + 1) % DualLayout.entries.size]
+                }
             }
             dualLayout = next
             applyDualSettings()
-            if (old == DualLayout.CUTOUT || next == DualLayout.CUTOUT) bindCamera() else refreshUi()
+            val needsRebind = { l: DualLayout -> l == DualLayout.CUTOUT || l == DualLayout.SOLO }
+            if (needsRebind(old) || needsRebind(next)) bindCamera() else refreshUi()
         }
         b.btnCorner.setOnClickListener {
             pipCorner = PipCorner.entries[(pipCorner.ordinal + 1) % PipCorner.entries.size]
@@ -1286,6 +1343,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun switchCamera() {
         if (isRecording && mode != Mode.DUAL) return
+        if (mode == Mode.DUAL && dualLayout == DualLayout.SOLO) {
+            if (isRecording) return
+            dualSwapped = !dualSwapped
+            b.btnSwitch.animate().rotationBy(180f).setDuration(250).start()
+            bindCamera()
+            return
+        }
         if (mode == Mode.DUAL) {
             dualSwapped = !dualSwapped
             dualZoomTarget = if (dualSwapped) 1 else 0
@@ -1378,7 +1442,10 @@ class MainActivity : AppCompatActivity() {
 
         // Dual panel
         b.dualPanel.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
-        b.btnLayout.text = "▦ " + dualLayout.label
+        b.btnLayout.text = "▦ " + if (dualLayout == DualLayout.SOLO) {
+            if (dualSwapped) "Front camera only" else "Rear camera only"
+        } else dualLayout.label
+        b.btnZoomTarget.visibility = if (dualLayout == DualLayout.SOLO) View.GONE else View.VISIBLE
         val pip = dualLayout == DualLayout.PIP
         val cut = dualLayout == DualLayout.CUTOUT
         b.btnCorner.visibility = if (pip || cut) View.VISIBLE else View.GONE
@@ -1544,14 +1611,7 @@ class MainActivity : AppCompatActivity() {
         val fullHd = dualFullHd && !hot
         if (dualFullHd && hot) Toast.makeText(this, "Phone is hot – recording at 720p", Toast.LENGTH_LONG).show()
         val (w, h) = dualCanvasSize(fullHd)
-        val values = MediaSaver.videoValues(MediaSaver.fileName("VLOG"))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-        val pfd = uri?.let { runCatching { contentResolver.openFileDescriptor(it, "w") }.getOrNull() }
-        if (uri == null || pfd == null) {
-            uri?.let { contentResolver.delete(it, null, null) }
+        val (uri, pfd) = newVideoEntry() ?: run {
             Toast.makeText(this, "Could not create video file", Toast.LENGTH_LONG).show()
             return
         }
@@ -1579,7 +1639,21 @@ class MainActivity : AppCompatActivity() {
             mr.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             mr.setVideoSize(w, h)
             mr.setVideoFrameRate(30)
-            mr.setVideoEncodingBitRate(if (fullHd) 16_000_000 else 8_000_000)
+            val videoBitrate = if (fullHd) 16_000_000 else 8_000_000
+            mr.setVideoEncodingBitRate(videoBitrate)
+            // Long rides: continue seamlessly into a new file about every 10 minutes
+            // (also avoids the 4 GB MP4 limit, and limits what a crash could lose).
+            mr.setMaxFileSize((videoBitrate + 128_000L) / 8L * SEGMENT_SECONDS)
+            mr.setOnInfoListener { _, what, _ ->
+                runOnUiThread {
+                    when (what) {
+                        MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING -> prepareNextSegment(mr)
+                        MediaRecorder.MEDIA_RECORDER_INFO_NEXT_OUTPUT_FILE_STARTED -> onNextSegmentStarted()
+                        MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ->
+                            if (mediaRecorder === mr) stopDualRecording()
+                    }
+                }
+            }
             if (audio) {
                 mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 mr.setAudioSamplingRate(if (mic?.bluetooth == true) 16_000 else 48_000)
@@ -1617,10 +1691,76 @@ class MainActivity : AppCompatActivity() {
         onRecordingStateChanged()
     }
 
+    /** Creates a pending MediaStore video entry and opens it for writing. */
+    private fun newVideoEntry(): Pair<Uri, android.os.ParcelFileDescriptor>? {
+        val values = MediaSaver.videoValues(MediaSaver.fileName("VLOG"))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        val pfd = runCatching { contentResolver.openFileDescriptor(uri, "w") }.getOrNull()
+        if (pfd == null) {
+            contentResolver.delete(uri, null, null)
+            return null
+        }
+        return uri to pfd
+    }
+
+    /** Closes a finished entry: publishes it if [ok], deletes it otherwise. Call off the main thread. */
+    private fun finalizeEntry(uri: Uri?, pfd: android.os.ParcelFileDescriptor?, ok: Boolean) {
+        runCatching { pfd?.close() }
+        if (uri == null) return
+        if (ok) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentResolver.update(uri, ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }, null, null)
+            }
+        } else {
+            contentResolver.delete(uri, null, null)
+        }
+    }
+
+    private fun prepareNextSegment(mr: MediaRecorder) {
+        if (mediaRecorder !== mr || dualNextUri != null) return
+        val (uri, pfd) = newVideoEntry() ?: return
+        try {
+            mr.setNextOutputFile(pfd.fileDescriptor)
+            dualNextUri = uri
+            dualNextPfd = pfd
+        } catch (e: Exception) {
+            Log.e(TAG, "setNextOutputFile failed", e)
+            ioExecutor.execute { finalizeEntry(uri, pfd, false) }
+        }
+    }
+
+    private fun onNextSegmentStarted() {
+        val oldUri = dualUri
+        val oldPfd = dualPfd
+        dualUri = dualNextUri
+        dualPfd = dualNextPfd
+        dualNextUri = null
+        dualNextPfd = null
+        val audio = dualHasAudio
+        ioExecutor.execute {
+            finalizeEntry(oldUri, oldPfd, true)
+            runOnUiThread {
+                if (oldUri != null) {
+                    setLastMedia(oldUri, true)
+                    if (audio && windLevel > 0) windFilter.enqueue(oldUri, windLevel)
+                }
+            }
+        }
+    }
+
     private fun stopDualRecording() {
         val mr = mediaRecorder ?: return
         val pfd = dualPfd
         val uri = dualUri
+        val nextUri = dualNextUri
+        val nextPfd = dualNextPfd
+        dualNextUri = null
+        dualNextPfd = null
         val audio = dualHasAudio
         dualStopping = true
         mediaRecorder = null
@@ -1640,18 +1780,8 @@ class MainActivity : AppCompatActivity() {
                 false
             }
             mr.release()
-            runCatching { pfd?.close() }
-            if (uri != null) {
-                if (ok) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        contentResolver.update(uri, ContentValues().apply {
-                            put(MediaStore.MediaColumns.IS_PENDING, 0)
-                        }, null, null)
-                    }
-                } else {
-                    contentResolver.delete(uri, null, null)
-                }
-            }
+            finalizeEntry(uri, pfd, ok)
+            finalizeEntry(nextUri, nextPfd, false)  // prepared but never started
             runOnUiThread {
                 dualStopping = false
                 recordingPaused = false
@@ -1963,6 +2093,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "VlogCam"
         private const val RIDE_DELAY_MS = 8_000L
+        private const val SEGMENT_SECONDS = 600L
         private const val MIN_FREE_BYTES = 300L * 1024 * 1024
         private const val LOW_FREE_BYTES = 2L * 1024 * 1024 * 1024
     }

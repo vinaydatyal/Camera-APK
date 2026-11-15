@@ -9,6 +9,8 @@ the front and rear cameras record at the same time into a single video.
 - Both cameras recorded at once into one MP4, with sound
 - Layouts: **Picture-in-picture**, **Side by side**, **Top / bottom**, **Split card** and **Cutout**
   - **Split card**: both cameras shown whole, side by side, over a smooth blurred background
+  - **Rear camera only**: one camera with all the ride features (overlay, mic choice, wind filter, ride mode);
+    Swap switches to the front camera. Also works on phones that can't run two cameras at once.
   - **Cutout**: you, cut out of the selfie camera (on-device ML Kit segmentation), placed over the rear view.
     Move the person left/centre/right and choose small/medium/large
 - Frame shape: Auto (9:16 portrait / 16:9 landscape), 9:16, 4:5, 1:1 or 16:9
@@ -19,6 +21,7 @@ the front and rear cameras record at the same time into a single video.
 - Change layout, move the inset or swap cameras live, even while recording
 - Zoom each camera separately (the "Zoom: Rear/Front" button picks which one)
 - Stabilization (when the phone supports it), 720p / 1080p
+- Long recordings are split seamlessly into ~10-minute files (no gap), so nothing is lost if the phone dies
 - Dual snapshot button for still photos of the combined view (also works while recording)
 - The preview shows exactly what gets recorded
 

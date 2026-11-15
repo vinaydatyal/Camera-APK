@@ -6,6 +6,7 @@ enum class DualLayout(val label: String) {
     STACKED("Top / bottom"),
     SPLIT_CARD("Split card"),   // both cameras whole, side by side, over a blurred background
     CUTOUT("Cutout"),           // you, cut out of the selfie camera, over the rear view
+    SOLO("Rear camera only"),   // one camera through the vlog pipeline (overlay, mic, wind filter)
 }
 
 enum class PipCorner { TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_LEFT }
