@@ -1,0 +1,7 @@
+<resources>
+    <color name="accent">#FFD54F</color>
+    <color name="record_red">#F44336</color>
+    <color name="pill">#66000000</color>
+    <color name="pill_active">#CCFFD54F</color>
+    <color name="ic_bg">#1E1E2A</color>
+</resources>
