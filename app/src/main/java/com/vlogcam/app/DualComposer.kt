@@ -4,6 +4,8 @@ enum class DualLayout(val label: String) {
     PIP("Picture-in-picture"),
     SIDE_BY_SIDE("Side by side"),
     STACKED("Top / bottom"),
+    SPLIT_CARD("Split card"),   // both cameras whole, side by side, over a blurred background
+    CUTOUT("Cutout"),           // you, cut out of the selfie camera, over the rear view
 }
 
 enum class PipCorner { TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_LEFT }
@@ -12,6 +14,8 @@ object DualComposer {
     /** Inset size as a fraction of the frame's width and height. */
     val PIP_SIZES = floatArrayOf(0.28f, 0.36f, 0.45f)
     val PIP_SIZE_LABELS = arrayOf("Small", "Medium", "Large")
+    /** Size of the cut-out person as a fraction of the frame, per size step. */
+    val CUTOUT_SCALES = floatArrayOf(0.6f, 0.8f, 1f)
 }
 
 /** Shape of the dual-camera frame (applies to preview, recording and snapshots). */

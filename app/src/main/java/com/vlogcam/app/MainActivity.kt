@@ -168,6 +168,16 @@ class MainActivity : AppCompatActivity() {
     private var dualFullHd = false
     private var dualFrame = DualFrame.AUTO
     private var dualFit = false
+    private var cutoutAnalysis: androidx.camera.core.ImageAnalysis? = null
+    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private val segmenter by lazy {
+        com.google.mlkit.vision.segmentation.Segmentation.getClient(
+            com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions.Builder()
+                .setDetectorMode(com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions.STREAM_MODE)
+                .enableRawSizeMask()
+                .build()
+        )
+    }
 
     private var lastMediaUri: Uri? = null
     private var lastMediaIsVideo = false
@@ -281,6 +291,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        runCatching { segmenter.close() }
+        analysisExecutor.shutdown()
         dualRenderer?.release()
         dualRenderer = null
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
@@ -370,7 +382,10 @@ class MainActivity : AppCompatActivity() {
         preview?.targetRotation = rotation
         imageCapture?.targetRotation = deviceRotation
         if (recording == null) videoCapture?.targetRotation = deviceRotation
-        if (mediaRecorder == null) dualPreviews.forEach { it.targetRotation = rotation }
+        if (mediaRecorder == null) {
+            dualPreviews.forEach { it.targetRotation = rotation }
+            cutoutAnalysis?.targetRotation = rotation
+        }
         dualRenderer?.displayRotationDeg = rotation * 90
         layoutDualSurface()
     }
@@ -409,6 +424,7 @@ class MainActivity : AppCompatActivity() {
             swapped = dualSwapped
             mirrorFront = this@MainActivity.mirrorFront
             fit = dualFit
+            cutoutScale = DualComposer.CUTOUT_SCALES[pipSizeIndex]
         }
     }
 
@@ -443,9 +459,13 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "Bind failed (stab=$allowStab)", e)
                 if (allowStab && stabilizationActive) continue
-                if (mode == Mode.DUAL && dualFullHd) {
-                    dualFullHd = false
-                    Toast.makeText(this, "Full HD dual not supported, using HD", Toast.LENGTH_SHORT).show()
+                if (mode == Mode.DUAL && dualLayout == DualLayout.CUTOUT) {
+                    dualLayout = DualLayout.PIP
+                    applyDualSettings()
+                    Toast.makeText(
+                        this, "Cutout isn't supported on this phone, using picture-in-picture",
+                        Toast.LENGTH_LONG
+                    ).show()
                     bindCamera()
                     return
                 }
@@ -467,6 +487,7 @@ class MainActivity : AppCompatActivity() {
         videoCapture = null
         stabilizationActive = false
         dualPreviews = emptyList()
+        cutoutAnalysis = null
         // Drop the cached dual session so the next bind uses the current layout.
         dualOwner?.destroy()
         dualOwner = null
@@ -598,17 +619,39 @@ class MainActivity : AppCompatActivity() {
         renderer.displayRotationDeg = rotation * 90
         applyDualSettings()
 
+        // Cutout: also analyse the front camera to find the person.
+        val frontSlot = infos.indexOfFirst { it.lensFacing == CameraSelector.LENS_FACING_FRONT }
+        val analysis = if (dualLayout == DualLayout.CUTOUT && frontSlot >= 0) {
+            androidx.camera.core.ImageAnalysis.Builder()
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(
+                            androidx.camera.core.resolutionselector.ResolutionStrategy(
+                                Size(640, 360),
+                                androidx.camera.core.resolutionselector.ResolutionStrategy
+                                    .FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                )
+                .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetRotation(rotation)
+                .build()
+                .also { it.setAnalyzer(analysisExecutor) { proxy -> analyzeForCutout(proxy) } }
+        } else null
+        if (analysis == null) renderer.clearMask()
+
         val owner = DisposableLifecycleOwner(this)
         dualOwner = owner
         val concurrent = provider.bindToLifecycle(
             infos.mapIndexed { slot, info ->
-                SingleCameraConfig(
-                    info.cameraSelector,
-                    UseCaseGroup.Builder().addUseCase(previews[slot]).build(),
-                    owner
-                )
+                val group = UseCaseGroup.Builder().addUseCase(previews[slot])
+                if (slot == frontSlot && analysis != null) group.addUseCase(analysis)
+                SingleCameraConfig(info.cameraSelector, group.build(), owner)
             }
         )
+        cutoutAnalysis = analysis
         dualCameras = concurrent.cameras
         dualPreviews = previews
         // Start on the widest field of view (e.g. 0.5x ultra-wide) — best for travel/vlogs.
@@ -852,9 +895,19 @@ class MainActivity : AppCompatActivity() {
 
         // Dual controls
         b.btnLayout.setOnClickListener {
-            dualLayout = DualLayout.entries[(dualLayout.ordinal + 1) % DualLayout.entries.size]
+            val old = dualLayout
+            var next = DualLayout.entries[(old.ordinal + 1) % DualLayout.entries.size]
+            if (isRecording) {
+                // Cutout needs the camera set up differently, so it can't be toggled mid-recording.
+                if (old == DualLayout.CUTOUT) {
+                    Toast.makeText(this, "Stop recording to leave Cutout", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                if (next == DualLayout.CUTOUT) next = DualLayout.entries[(next.ordinal + 1) % DualLayout.entries.size]
+            }
+            dualLayout = next
             applyDualSettings()
-            refreshUi()
+            if (old == DualLayout.CUTOUT || next == DualLayout.CUTOUT) bindCamera() else refreshUi()
         }
         b.btnCorner.setOnClickListener {
             pipCorner = PipCorner.entries[(pipCorner.ordinal + 1) % PipCorner.entries.size]
@@ -978,9 +1031,13 @@ class MainActivity : AppCompatActivity() {
         b.dualPanel.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
         b.btnLayout.text = "▦ " + dualLayout.label
         val pip = dualLayout == DualLayout.PIP
-        b.btnCorner.visibility = if (pip) View.VISIBLE else View.GONE
-        b.btnPipSize.visibility = if (pip) View.VISIBLE else View.GONE
-        b.btnPipSize.text = "Inset: " + DualComposer.PIP_SIZE_LABELS[pipSizeIndex]
+        val cut = dualLayout == DualLayout.CUTOUT
+        b.btnCorner.visibility = if (pip || cut) View.VISIBLE else View.GONE
+        b.btnPipSize.visibility = if (pip || cut) View.VISIBLE else View.GONE
+        b.btnCorner.text = if (cut) "Move person" else "Move inset"
+        b.btnPipSize.text = (if (cut) "Person: " else "Inset: ") + DualComposer.PIP_SIZE_LABELS[pipSizeIndex]
+        b.btnSwap.visibility = if (cut) View.GONE else View.VISIBLE
+        b.btnDualFit.visibility = if (dualLayout == DualLayout.SPLIT_CARD) View.GONE else View.VISIBLE
         val targetCam = dualCameras.getOrNull(dualZoomTarget)
         b.btnZoomTarget.text = "🔍 Zoom: " + when (targetCam?.cameraInfo?.lensFacing) {
             CameraSelector.LENS_FACING_FRONT -> "Front"
@@ -1396,6 +1453,33 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Toast.makeText(this, "Could not open installer: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    // ---------------------------------------------------------------- cutout segmentation
+
+    /** Finds the person in a front-camera frame and hands the mask to the renderer. */
+    @androidx.annotation.OptIn(markerClass = [androidx.camera.core.ExperimentalGetImage::class])
+    private fun analyzeForCutout(proxy: androidx.camera.core.ImageProxy) {
+        val media = proxy.image
+        if (media == null) {
+            proxy.close()
+            return
+        }
+        val input = com.google.mlkit.vision.common.InputImage.fromMediaImage(
+            media, proxy.imageInfo.rotationDegrees
+        )
+        segmenter.process(input)
+            .addOnSuccessListener(analysisExecutor) { mask ->
+                val buf = mask.buffer
+                buf.rewind()
+                val n = mask.width * mask.height
+                val bytes = ByteArray(n)
+                for (i in 0 until n) {
+                    bytes[i] = (buf.float.coerceIn(0f, 1f) * 255f).toInt().toByte()
+                }
+                dualRenderer?.updateMask(bytes, mask.width, mask.height)
+            }
+            .addOnCompleteListener(analysisExecutor) { proxy.close() }
     }
 
     // ---------------------------------------------------------------- export for social media

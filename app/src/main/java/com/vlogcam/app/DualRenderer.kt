@@ -21,6 +21,7 @@ import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -29,7 +30,6 @@ import kotlin.math.roundToInt
 /**
  * Draws the two concurrent camera streams into one frame with OpenGL.
  *
- * Each camera is centre-cropped to fill its region, so split layouts use the whole frame.
  * The same scene is drawn to the on-screen SurfaceView, to the video encoder while
  * recording, and to an offscreen buffer for snapshots, so what you see is what you get.
  *
@@ -43,6 +43,8 @@ class DualRenderer {
         var hasFrame = false
     }
 
+    private class Mask(val bytes: ByteArray, val width: Int, val height: Int)
+
     private val thread = HandlerThread("DualRenderer").apply { start() }
     private val handler = Handler(thread.looper)
     private val glExecutor = Executor { handler.post(it) }
@@ -51,10 +53,11 @@ class DualRenderer {
     @Volatile var layout = DualLayout.PIP
     @Volatile var corner = PipCorner.TOP_RIGHT
     @Volatile var pipSize = DualComposer.PIP_SIZES[1]
+    @Volatile var cutoutScale = 1f
     @Volatile var swapped = false
     @Volatile var mirrorFront = true
     @Volatile var displayRotationDeg = 0
-    /** Fit: show each camera's whole picture over a blurred copy instead of cropping. */
+    /** Fit: show each camera's whole picture over a blurred background instead of cropping. */
     @Volatile var fit = false
     private val isFront = BooleanArray(2)
 
@@ -73,18 +76,43 @@ class DualRenderer {
     private var encH = 0
     private var encRotationDeg = 0
 
-    private var program = 0
-    private var aPos = 0
-    private var aTex = 0
-    private var uTex = 0
-    private var blurProgram = 0
-    private var bPos = 0
-    private var bTex = 0
-    private var bSampler = 0
-    private var bStep = 0
+    // Camera (external texture) program
+    private var oesProg = 0
+    private var oesPos = 0
+    private var oesTex = 0
+    private var oesSampler = 0
+
+    // Cutout program: camera texture + person mask -> alpha
+    private var cutProg = 0
+    private var cutPos = 0
+    private var cutTex = 0
+    private var cutMaskCoord = 0
+    private var cutSampler = 0
+    private var cutMaskSampler = 0
+
+    // Gaussian blur program on a regular 2D texture
+    private var blurProg = 0
+    private var blurPos = 0
+    private var blurTex = 0
+    private var blurSampler = 0
+    private var blurStep = 0
+    private var blurDim = 0
+
     private val posBuf = floatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
+    private val quadTexBuf = floatBuffer(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
     private val texBuf = floatBuffer(FloatArray(8))
+    private val maskBuf = floatBuffer(FloatArray(8))
     private val texCoords = FloatArray(8)
+    private val maskCoords = FloatArray(8)
+
+    // Small offscreen buffers for the background blur.
+    private val fboTex = IntArray(2)
+    private val fbo = IntArray(2)
+
+    // Person mask for the cutout layout.
+    private var maskTex = 0
+    private var maskReady = false
+    private val pendingMask = AtomicReference<Mask?>(null)
 
     private val streams = arrayOfNulls<Stream>(2)
     private var released = false
@@ -104,6 +132,20 @@ class DualRenderer {
         handler.post { provideSurface(slot, request) }
     }
 
+    /**
+     * New person mask (0-255 per pixel, rows top to bottom, upright and un-mirrored).
+     * Only the latest mask is kept if the GL thread is busy.
+     */
+    fun updateMask(bytes: ByteArray, width: Int, height: Int) {
+        if (pendingMask.getAndSet(Mask(bytes, width, height)) == null) {
+            handler.post { uploadMask() }
+        }
+    }
+
+    fun clearMask() {
+        handler.post { maskReady = false }
+    }
+
     /** Sets (or clears, with null) the on-screen surface. Blocks until applied. */
     fun setDisplaySurface(surface: Surface?, width: Int, height: Int) {
         runBlocking {
@@ -121,7 +163,7 @@ class DualRenderer {
         }
     }
 
-    /** Starts feeding frames to [surface] (the encoder input). [onReady] runs on the GL thread. */
+    /** Starts feeding frames to [surface] (the encoder input). Blocks until applied. */
     fun startEncoder(surface: Surface, width: Int, height: Int, rotationDeg: Int) {
         runBlocking {
             destroySurface(encoderSurface)
@@ -224,15 +266,54 @@ class DualRenderer {
         )
         makeCurrent(dummySurface)
 
-        program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
-        aPos = GLES20.glGetAttribLocation(program, "aPos")
-        aTex = GLES20.glGetAttribLocation(program, "aTex")
-        uTex = GLES20.glGetUniformLocation(program, "sTex")
-        blurProgram = buildProgram(VERTEX_SHADER, BLUR_FRAGMENT_SHADER)
-        bPos = GLES20.glGetAttribLocation(blurProgram, "aPos")
-        bTex = GLES20.glGetAttribLocation(blurProgram, "aTex")
-        bSampler = GLES20.glGetUniformLocation(blurProgram, "sTex")
-        bStep = GLES20.glGetUniformLocation(blurProgram, "uStep")
+        oesProg = buildProgram(VERTEX_SHADER, OES_FRAGMENT_SHADER)
+        oesPos = GLES20.glGetAttribLocation(oesProg, "aPos")
+        oesTex = GLES20.glGetAttribLocation(oesProg, "aTex")
+        oesSampler = GLES20.glGetUniformLocation(oesProg, "sTex")
+
+        cutProg = buildProgram(CUTOUT_VERTEX_SHADER, CUTOUT_FRAGMENT_SHADER)
+        cutPos = GLES20.glGetAttribLocation(cutProg, "aPos")
+        cutTex = GLES20.glGetAttribLocation(cutProg, "aTex")
+        cutMaskCoord = GLES20.glGetAttribLocation(cutProg, "aMask")
+        cutSampler = GLES20.glGetUniformLocation(cutProg, "sTex")
+        cutMaskSampler = GLES20.glGetUniformLocation(cutProg, "sMask")
+
+        blurProg = buildProgram(VERTEX_SHADER, BLUR_FRAGMENT_SHADER)
+        blurPos = GLES20.glGetAttribLocation(blurProg, "aPos")
+        blurTex = GLES20.glGetAttribLocation(blurProg, "aTex")
+        blurSampler = GLES20.glGetUniformLocation(blurProg, "sTex")
+        blurStep = GLES20.glGetUniformLocation(blurProg, "uStep")
+        blurDim = GLES20.glGetUniformLocation(blurProg, "uDim")
+
+        // Two small render targets for the separable background blur.
+        GLES20.glGenTextures(2, fboTex, 0)
+        GLES20.glGenFramebuffers(2, fbo, 0)
+        for (i in 0..1) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTex[i])
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, BLUR_W, BLUR_H, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+            )
+            setTexParams(GLES20.GL_TEXTURE_2D)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[i])
+            GLES20.glFramebufferTexture2D(
+                GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTex[i], 0
+            )
+        }
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+        val mt = IntArray(1)
+        GLES20.glGenTextures(1, mt, 0)
+        maskTex = mt[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
+        setTexParams(GLES20.GL_TEXTURE_2D)
+    }
+
+    private fun setTexParams(target: Int) {
+        GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(target, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
     }
 
     private fun makeCurrent(surface: EGLSurface) {
@@ -257,10 +338,7 @@ class DualRenderer {
         val tex = IntArray(1)
         GLES20.glGenTextures(1, tex, 0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0])
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        setTexParams(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
 
         val size = request.resolution
         val st = SurfaceTexture(tex[0])
@@ -281,6 +359,19 @@ class DualRenderer {
             }
             if (streams[slot] === stream) streams[slot] = null
         }
+    }
+
+    private fun uploadMask() {
+        val mask = pendingMask.getAndSet(null) ?: return
+        if (released || eglDisplay == EGL14.EGL_NO_DISPLAY) return
+        makeCurrent(dummySurface)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE, mask.width, mask.height, 0,
+            GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, ByteBuffer.wrap(mask.bytes)
+        )
+        maskReady = true
     }
 
     // ------------------------------------------------------------------ rendering
@@ -310,26 +401,42 @@ class DualRenderer {
         }
     }
 
+    private fun backSlot(): Int = if (isFront[0] && !isFront[1]) 1 else 0
+
+    private fun preferredMainSlot(): Int =
+        if (layout == DualLayout.CUTOUT) backSlot() else if (swapped) 1 else 0
+
     private fun mainSlot(): Int {
-        val wanted = if (swapped) 1 else 0
+        val wanted = preferredMainSlot()
         return if (streams[wanted]?.hasFrame == true) wanted else 1 - wanted
     }
 
     private fun drawScene(w: Int, h: Int, rotationDeg: Int) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         GLES20.glViewport(0, 0, w, h)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-        val mainIdx = if (swapped) 1 else 0
-        val main = streams[mainIdx]
-        val second = streams[1 - mainIdx]
+        val lay = layout
+        val mainIdx = preferredMainSlot()
+        val secondIdx = 1 - mainIdx
+        val main = streams[mainIdx]?.takeIf { it.hasFrame }
+        val second = streams[secondIdx]?.takeIf { it.hasFrame }
+        val useFit = fit || lay == DualLayout.SPLIT_CARD
         val gap = max(2, (min(w, h) * 0.004f).roundToInt())
 
-        when (layout) {
+        if (useFit) {
+            when {
+                main != null -> drawBlurredBackground(main, mainIdx, w, h, rotationDeg)
+                second != null -> drawBlurredBackground(second, secondIdx, w, h, rotationDeg)
+            }
+        }
+
+        when (lay) {
             DualLayout.PIP -> {
-                drawSlot(main, mainIdx, 0, 0, w, h, rotationDeg)
-                if (second?.hasFrame == true) {
+                drawSlot(main, mainIdx, 0, 0, w, h, rotationDeg, useFit)
+                if (second != null) {
                     val pw = (w * pipSize).roundToInt()
                     val ph = (h * pipSize).roundToInt()
                     val m = (min(w, h) * 0.04f).roundToInt()
@@ -338,52 +445,35 @@ class DualRenderer {
                     val x = if (right) w - m - pw else m
                     val y = if (top) h - m - ph else m  // GL origin is bottom-left
                     fillRect(x - gap, y - gap, pw + 2 * gap, ph + 2 * gap, 1f)
-                    drawStream(second, 1 - mainIdx, x, y, pw, ph, rotationDeg)
+                    drawStream(second, secondIdx, x, y, pw, ph, rotationDeg)
                 }
             }
-            DualLayout.SIDE_BY_SIDE -> {
+            DualLayout.SIDE_BY_SIDE, DualLayout.SPLIT_CARD -> {
                 val half = w / 2
-                drawSlot(main, mainIdx, 0, 0, half, h, rotationDeg)
-                drawSlot(second, 1 - mainIdx, half, 0, w - half, h, rotationDeg)
-                fillRect(half - gap / 2, 0, gap, h, 0f)
+                drawSlot(main, mainIdx, 0, 0, half, h, rotationDeg, useFit)
+                drawSlot(second, secondIdx, half, 0, w - half, h, rotationDeg, useFit)
+                if (!useFit) fillRect(half - gap / 2, 0, gap, h, 0f)
             }
             DualLayout.STACKED -> {
                 val half = h / 2
-                drawSlot(main, mainIdx, 0, h - half, w, half, rotationDeg)
-                drawSlot(second, 1 - mainIdx, 0, 0, w, h - half, rotationDeg)
-                fillRect(0, h - half - gap / 2, w, gap, 0f)
+                drawSlot(main, mainIdx, 0, h - half, w, half, rotationDeg, useFit)
+                drawSlot(second, secondIdx, 0, 0, w, h - half, rotationDeg, useFit)
+                if (!useFit) fillRect(0, h - half - gap / 2, w, gap, 0f)
             }
-        }
-    }
-
-    /** Upright aspect (width / height) of a stream for the given display rotation. */
-    private fun uprightAspect(stream: Stream, rotationDeg: Int): Float {
-        val m = stream.matrix
-        val camTransform = stream.info?.hasCameraTransform() ?: true
-        val r = if (camTransform) (360 - rotationDeg) % 360 else ((stream.info?.rotationDegrees ?: 0) % 360)
-        val stRotated = abs(m[0]) < abs(m[1])
-        var w = if (stRotated) stream.bufH else stream.bufW
-        var h = if (stRotated) stream.bufW else stream.bufH
-        if (r == 90 || r == 270) { val t = w; w = h; h = t }
-        return w.toFloat() / h
-    }
-
-    /** Draws a stream into a layout slot, cropped to fill or (in fit mode) whole over a blur. */
-    private fun drawSlot(stream: Stream?, slot: Int, x: Int, y: Int, w: Int, h: Int, rotationDeg: Int) {
-        if (stream == null || !stream.hasFrame || w <= 0 || h <= 0) return
-        if (!fit) {
-            drawStream(stream, slot, x, y, w, h, rotationDeg)
-            return
-        }
-        drawStream(stream, slot, x, y, w, h, rotationDeg, blur = true)
-        val src = uprightAspect(stream, rotationDeg)
-        val dst = w.toFloat() / h
-        if (src > dst) {
-            val fh = (w / src).roundToInt()
-            drawStream(stream, slot, x, y + (h - fh) / 2, w, fh, rotationDeg)
-        } else {
-            val fw = (h * src).roundToInt()
-            drawStream(stream, slot, x + (w - fw) / 2, y, fw, h, rotationDeg)
+            DualLayout.CUTOUT -> {
+                drawSlot(main, mainIdx, 0, 0, w, h, rotationDeg, useFit)
+                if (second != null && maskReady) {
+                    val s = cutoutScale.coerceIn(0.3f, 1f)
+                    val cw = (w * s).roundToInt()
+                    val ch = (h * s).roundToInt()
+                    val x = when (corner) {
+                        PipCorner.BOTTOM_RIGHT -> w - cw
+                        PipCorner.BOTTOM_LEFT -> 0
+                        else -> (w - cw) / 2
+                    }
+                    drawStream(second, secondIdx, x, 0, cw, ch, rotationDeg, cutout = true)
+                }
+            }
         }
     }
 
@@ -396,14 +486,94 @@ class DualRenderer {
     }
 
     /**
+     * Smooth, darkened blur of [stream] filling the whole frame: render small, run a
+     * separable Gaussian twice, then scale back up (bilinear upscaling adds more softness).
+     */
+    private fun drawBlurredBackground(stream: Stream, slot: Int, w: Int, h: Int, rotationDeg: Int) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[0])
+        drawStream(stream, slot, 0, 0, BLUR_W, BLUR_H, rotationDeg, aspectOverride = w.toFloat() / h)
+        val sx = 1f / BLUR_W
+        val sy = 1f / BLUR_H
+        blurPass(fboTex[0], fbo[1], sx, 0f)
+        blurPass(fboTex[1], fbo[0], 0f, sy)
+        blurPass(fboTex[0], fbo[1], 2f * sx, 0f)
+        blurPass(fboTex[1], fbo[0], 0f, 2f * sy)
+        blurPass(fboTex[0], fbo[1], 4f * sx, 0f)
+        blurPass(fboTex[1], fbo[0], 0f, 4f * sy)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, w, h)
+        drawTexture2D(fboTex[0], 0f, 0f, 0.6f)
+    }
+
+    private fun blurPass(srcTex: Int, dstFbo: Int, stepX: Float, stepY: Float) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, dstFbo)
+        GLES20.glViewport(0, 0, BLUR_W, BLUR_H)
+        drawTexture2D(srcTex, stepX, stepY, 1f)
+    }
+
+    private fun drawTexture2D(tex: Int, stepX: Float, stepY: Float, dim: Float) {
+        GLES20.glUseProgram(blurProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+        GLES20.glUniform1i(blurSampler, 0)
+        GLES20.glUniform2f(blurStep, stepX, stepY)
+        GLES20.glUniform1f(blurDim, dim)
+        posBuf.position(0)
+        quadTexBuf.position(0)
+        GLES20.glVertexAttribPointer(blurPos, 2, GLES20.GL_FLOAT, false, 0, posBuf)
+        GLES20.glEnableVertexAttribArray(blurPos)
+        GLES20.glVertexAttribPointer(blurTex, 2, GLES20.GL_FLOAT, false, 0, quadTexBuf)
+        GLES20.glEnableVertexAttribArray(blurTex)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(blurPos)
+        GLES20.glDisableVertexAttribArray(blurTex)
+    }
+
+    /** Upright aspect (width / height) of a stream for the given display rotation. */
+    private fun uprightAspect(stream: Stream, rotationDeg: Int): Float {
+        val m = stream.matrix
+        val info = stream.info
+        val camTransform = info?.hasCameraTransform() ?: true
+        val r = if (camTransform) (360 - rotationDeg) % 360 else ((info?.rotationDegrees ?: 0) % 360)
+        val stRotated = abs(m[0]) < abs(m[1])
+        var sw = if (stRotated) stream.bufH else stream.bufW
+        var sh = if (stRotated) stream.bufW else stream.bufH
+        if (r == 90 || r == 270) { val t = sw; sw = sh; sh = t }
+        return sw.toFloat() / sh
+    }
+
+    /** Draws a stream into a layout slot, cropped to fill or (in fit mode) whole. */
+    private fun drawSlot(
+        stream: Stream?, slot: Int, x: Int, y: Int, w: Int, h: Int, rotationDeg: Int, useFit: Boolean,
+    ) {
+        if (stream == null || w <= 0 || h <= 0) return
+        if (!useFit) {
+            drawStream(stream, slot, x, y, w, h, rotationDeg)
+            return
+        }
+        val src = uprightAspect(stream, rotationDeg)
+        val dst = w.toFloat() / h
+        if (src > dst) {
+            val fh = (w / src).roundToInt()
+            drawStream(stream, slot, x, y + (h - fh) / 2, w, fh, rotationDeg)
+        } else {
+            val fw = (h * src).roundToInt()
+            drawStream(stream, slot, x + (w - fw) / 2, y, fw, h, rotationDeg)
+        }
+    }
+
+    /**
      * Draws [stream] centre-cropped into the viewport rect, rotated upright for a display
-     * rotated by [rotationDeg].
+     * rotated by [rotationDeg]. [aspectOverride] crops for a different aspect than the
+     * viewport (used when rendering into the small blur buffer). With [cutout], only the
+     * person (per the segmentation mask) is drawn.
      */
     private fun drawStream(
-        stream: Stream?, slot: Int, x: Int, y: Int, w: Int, h: Int, rotationDeg: Int,
-        blur: Boolean = false,
+        stream: Stream, slot: Int, x: Int, y: Int, w: Int, h: Int, rotationDeg: Int,
+        aspectOverride: Float = 0f,
+        cutout: Boolean = false,
     ) {
-        if (stream == null || !stream.hasFrame || w <= 0 || h <= 0) return
+        if (!stream.hasFrame || w <= 0 || h <= 0) return
         val m = stream.matrix
         val info = stream.info
         val camTransform = info?.hasCameraTransform() ?: true
@@ -412,13 +582,8 @@ class DualRenderer {
         // SurfaceTexture matrix already makes the image upright for the phone's natural
         // orientation, and front cameras come out mirrored. We only undo the display rotation.
         val r = if (camTransform) (360 - rotationDeg) % 360 else ((info?.rotationDegrees ?: 0) % 360)
-        val stRotated = abs(m[0]) < abs(m[1])
-        val w1 = if (stRotated) stream.bufH else stream.bufW
-        val h1 = if (stRotated) stream.bufW else stream.bufH
-        val (w2, h2) = if (r == 90 || r == 270) h1 to w1 else w1 to h1
-
-        val src = w2.toFloat() / h2
-        val dst = w.toFloat() / h
+        val src = uprightAspect(stream, rotationDeg)
+        val dst = if (aspectOverride > 0f) aspectOverride else w.toFloat() / h
         var u0 = 0f
         var u1 = 1f
         var v0 = 0f
@@ -430,52 +595,74 @@ class DualRenderer {
             val k = src / dst
             v0 = (1f - k) / 2f; v1 = 1f - v0
         }
-        val mirror = isFront[slot] && (if (camTransform) !mirrorFront else mirrorFront)
+        val front = isFront[slot]
+        val flip = front && (if (camTransform) !mirrorFront else mirrorFront)
 
         for (i in 0 until 4) {
             val cu = (i % 2).toFloat()
             val cv = (i / 2).toFloat()
-            var u = u0 + cu * (u1 - u0)
-            val v = v0 + cv * (v1 - v0)
-            if (mirror) u = 1f - u
+            val du = u0 + cu * (u1 - u0)  // displayed (upright) coords
+            val dv = v0 + cv * (v1 - v0)
+            val u = if (flip) 1f - du else du
             // Map upright coords back to the (matrix-space) source, undoing a clockwise rotation r.
             val sx: Float
             val sy: Float
             when (r) {
-                90 -> { sx = 1f - v; sy = u }
-                180 -> { sx = 1f - u; sy = 1f - v }
-                270 -> { sx = v; sy = 1f - u }
-                else -> { sx = u; sy = v }
+                90 -> { sx = 1f - dv; sy = u }
+                180 -> { sx = 1f - u; sy = 1f - dv }
+                270 -> { sx = dv; sy = 1f - u }
+                else -> { sx = u; sy = dv }
             }
             texCoords[i * 2] = m[0] * sx + m[4] * sy + m[12]
             texCoords[i * 2 + 1] = m[1] * sx + m[5] * sy + m[13]
+            // The mask is upright and un-mirrored, with its first row at the top.
+            val displayedMirrored = front && mirrorFront
+            maskCoords[i * 2] = if (displayedMirrored) 1f - du else du
+            maskCoords[i * 2 + 1] = 1f - dv
         }
         texBuf.position(0)
         texBuf.put(texCoords)
         texBuf.position(0)
 
-        val prog = if (blur) blurProgram else program
-        val posLoc = if (blur) bPos else aPos
-        val texLoc = if (blur) bTex else aTex
         GLES20.glViewport(x, y, w, h)
-        GLES20.glUseProgram(prog)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, stream.texId)
-        if (blur) {
-            GLES20.glUniform1i(bSampler, 0)
-            // Blur radius proportional to the slot, in texture units.
-            GLES20.glUniform2f(bStep, 0.012f, 0.012f)
-        } else {
-            GLES20.glUniform1i(uTex, 0)
-        }
         posBuf.position(0)
-        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, posBuf)
-        GLES20.glEnableVertexAttribArray(posLoc)
-        GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, texBuf)
-        GLES20.glEnableVertexAttribArray(texLoc)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        GLES20.glDisableVertexAttribArray(posLoc)
-        GLES20.glDisableVertexAttribArray(texLoc)
+
+        if (cutout) {
+            maskBuf.position(0)
+            maskBuf.put(maskCoords)
+            maskBuf.position(0)
+            GLES20.glUseProgram(cutProg)
+            GLES20.glUniform1i(cutSampler, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
+            GLES20.glUniform1i(cutMaskSampler, 1)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glVertexAttribPointer(cutPos, 2, GLES20.GL_FLOAT, false, 0, posBuf)
+            GLES20.glEnableVertexAttribArray(cutPos)
+            GLES20.glVertexAttribPointer(cutTex, 2, GLES20.GL_FLOAT, false, 0, texBuf)
+            GLES20.glEnableVertexAttribArray(cutTex)
+            GLES20.glVertexAttribPointer(cutMaskCoord, 2, GLES20.GL_FLOAT, false, 0, maskBuf)
+            GLES20.glEnableVertexAttribArray(cutMaskCoord)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisable(GLES20.GL_BLEND)
+            GLES20.glDisableVertexAttribArray(cutPos)
+            GLES20.glDisableVertexAttribArray(cutTex)
+            GLES20.glDisableVertexAttribArray(cutMaskCoord)
+        } else {
+            GLES20.glUseProgram(oesProg)
+            GLES20.glUniform1i(oesSampler, 0)
+            GLES20.glVertexAttribPointer(oesPos, 2, GLES20.GL_FLOAT, false, 0, posBuf)
+            GLES20.glEnableVertexAttribArray(oesPos)
+            GLES20.glVertexAttribPointer(oesTex, 2, GLES20.GL_FLOAT, false, 0, texBuf)
+            GLES20.glEnableVertexAttribArray(oesTex)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisableVertexAttribArray(oesPos)
+            GLES20.glDisableVertexAttribArray(oesTex)
+        }
     }
 
     private fun renderToBitmap(w: Int, h: Int): Bitmap? {
@@ -524,6 +711,8 @@ class DualRenderer {
     companion object {
         private const val TAG = "DualRenderer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val BLUR_W = 120
+        private const val BLUR_H = 120
 
         private const val VERTEX_SHADER = """
             attribute vec4 aPos;
@@ -535,7 +724,7 @@ class DualRenderer {
             }
         """
 
-        private const val FRAGMENT_SHADER = """
+        private const val OES_FRAGMENT_SHADER = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             varying vec2 vTex;
@@ -545,21 +734,47 @@ class DualRenderer {
             }
         """
 
-        // Cheap single-pass blur (7x7 taps, wide spacing) and darkening for fit-mode backgrounds.
-        private const val BLUR_FRAGMENT_SHADER = """
+        private const val CUTOUT_VERTEX_SHADER = """
+            attribute vec4 aPos;
+            attribute vec2 aTex;
+            attribute vec2 aMask;
+            varying vec2 vTex;
+            varying vec2 vMask;
+            void main() {
+                gl_Position = aPos;
+                vTex = aTex;
+                vMask = aMask;
+            }
+        """
+
+        // Soft edge: fully transparent below ~0.35 confidence, opaque above ~0.75.
+        private const val CUTOUT_FRAGMENT_SHADER = """
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             varying vec2 vTex;
+            varying vec2 vMask;
             uniform samplerExternalOES sTex;
-            uniform vec2 uStep;
+            uniform sampler2D sMask;
             void main() {
-                vec3 c = vec3(0.0);
-                for (int i = -3; i <= 3; i++) {
-                    for (int j = -3; j <= 3; j++) {
-                        c += texture2D(sTex, vTex + vec2(float(i), float(j)) * uStep).rgb;
-                    }
-                }
-                gl_FragColor = vec4(c / 49.0 * 0.55, 1.0);
+                float a = smoothstep(0.35, 0.75, texture2D(sMask, vMask).r);
+                gl_FragColor = vec4(texture2D(sTex, vTex).rgb, a);
+            }
+        """
+
+        // 9-tap Gaussian (linear-sampling weights); uStep = 0 gives a plain copy.
+        private const val BLUR_FRAGMENT_SHADER = """
+            precision mediump float;
+            varying vec2 vTex;
+            uniform sampler2D sTex;
+            uniform vec2 uStep;
+            uniform float uDim;
+            void main() {
+                vec3 c = texture2D(sTex, vTex).rgb * 0.2270270270;
+                c += texture2D(sTex, vTex + uStep * 1.3846153846).rgb * 0.3162162162;
+                c += texture2D(sTex, vTex - uStep * 1.3846153846).rgb * 0.3162162162;
+                c += texture2D(sTex, vTex + uStep * 3.2307692308).rgb * 0.0702702703;
+                c += texture2D(sTex, vTex - uStep * 3.2307692308).rgb * 0.0702702703;
+                gl_FragColor = vec4(c * uDim, 1.0);
             }
         """
 
