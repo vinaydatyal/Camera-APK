@@ -133,7 +133,7 @@ class Exporter(private val context: Context) {
     fun join(sources: List<Uri>, onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit) {
         cancelled = false
         val items = sources.map { EditedMediaItem.Builder(MediaItem.fromUri(it)).build() }
-        val sequence = EditedMediaItemSequence(items)
+        val sequence = EditedMediaItemSequence.Builder(items).build()
         // Our own ride parts share one format, so try copying without re-encoding first.
         val fast = Composition.Builder(sequence).setTransmuxAudio(true).setTransmuxVideo(true).build()
         val full = Composition.Builder(sequence).build()
