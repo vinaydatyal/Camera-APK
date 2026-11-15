@@ -15,6 +15,10 @@ android {
         val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionCode = build
         versionName = "1.$build"
+        // Phones only: skip x86 emulator libraries (keeps the APK much smaller).
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
         buildConfigField(
             "String",
             "UPDATE_BASE_URL",
