@@ -61,6 +61,8 @@ class DualRenderer {
     @Volatile var fit = false
     /** Skip drawing to the screen (ride mode) while still feeding the encoder. */
     @Volatile var displayPaused = false
+    /** Corner for the speed/location overlay. */
+    @Volatile var overlayCorner = PipCorner.BOTTOM_LEFT
     private val isFront = BooleanArray(2)
 
     private var eglDisplay = EGL14.EGL_NO_DISPLAY
@@ -116,6 +118,17 @@ class DualRenderer {
     private var maskReady = false
     private val pendingMask = AtomicReference<Mask?>(null)
 
+    // Speed/location overlay (premultiplied RGBA bitmap texture).
+    private var overlayTex = 0
+    private var overlayReady = false
+    private var overlayAspect = 1f
+    private val pendingOverlay = AtomicReference<Bitmap?>(null)
+    private var texProg = 0
+    private var texPos = 0
+    private var texTex = 0
+    private var texSampler = 0
+    private val flippedTexBuf = floatBuffer(floatArrayOf(0f, 1f, 1f, 1f, 0f, 0f, 1f, 0f))
+
     private val streams = arrayOfNulls<Stream>(2)
     private var released = false
 
@@ -142,6 +155,26 @@ class DualRenderer {
         if (pendingMask.getAndSet(Mask(bytes, width, height)) == null) {
             handler.post { uploadMask() }
         }
+    }
+
+    /** Sets the overlay image (drawn on every output), or null to hide it. */
+    fun setOverlay(bitmap: Bitmap?) {
+        if (bitmap == null) {
+            pendingOverlay.set(null)
+            handler.post { overlayReady = false }
+            return
+        }
+        if (pendingOverlay.getAndSet(bitmap) == null) handler.post { uploadOverlay() }
+    }
+
+    private fun uploadOverlay() {
+        val bmp = pendingOverlay.getAndSet(null) ?: return
+        if (released || eglDisplay == EGL14.EGL_NO_DISPLAY) return
+        makeCurrent(dummySurface)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTex)
+        android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+        overlayAspect = bmp.width.toFloat() / bmp.height
+        overlayReady = true
     }
 
     fun clearMask() {
@@ -304,11 +337,19 @@ class DualRenderer {
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-        val mt = IntArray(1)
-        GLES20.glGenTextures(1, mt, 0)
+        val mt = IntArray(2)
+        GLES20.glGenTextures(2, mt, 0)
         maskTex = mt[0]
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, maskTex)
         setTexParams(GLES20.GL_TEXTURE_2D)
+        overlayTex = mt[1]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTex)
+        setTexParams(GLES20.GL_TEXTURE_2D)
+
+        texProg = buildProgram(VERTEX_SHADER, TEX_FRAGMENT_SHADER)
+        texPos = GLES20.glGetAttribLocation(texProg, "aPos")
+        texTex = GLES20.glGetAttribLocation(texProg, "aTex")
+        texSampler = GLES20.glGetUniformLocation(texProg, "sTex")
     }
 
     private fun setTexParams(target: Int) {
@@ -477,6 +518,34 @@ class DualRenderer {
                 }
             }
         }
+        if (overlayReady) drawOverlay(w, h)
+    }
+
+    private fun drawOverlay(w: Int, h: Int) {
+        val ow = (w * (if (w <= h) 0.62f else 0.36f)).roundToInt()
+        val oh = (ow / overlayAspect).roundToInt()
+        val m = (min(w, h) * 0.035f).roundToInt()
+        val right = overlayCorner == PipCorner.TOP_RIGHT || overlayCorner == PipCorner.BOTTOM_RIGHT
+        val top = overlayCorner == PipCorner.TOP_RIGHT || overlayCorner == PipCorner.TOP_LEFT
+        val x = if (right) w - m - ow else m
+        val y = if (top) h - m - oh else m
+        GLES20.glViewport(x, y, ow, oh)
+        GLES20.glUseProgram(texProg)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTex)
+        GLES20.glUniform1i(texSampler, 0)
+        posBuf.position(0)
+        flippedTexBuf.position(0)
+        GLES20.glVertexAttribPointer(texPos, 2, GLES20.GL_FLOAT, false, 0, posBuf)
+        GLES20.glEnableVertexAttribArray(texPos)
+        GLES20.glVertexAttribPointer(texTex, 2, GLES20.GL_FLOAT, false, 0, flippedTexBuf)
+        GLES20.glEnableVertexAttribArray(texTex)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)  // premultiplied
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        GLES20.glDisableVertexAttribArray(texPos)
+        GLES20.glDisableVertexAttribArray(texTex)
     }
 
     private fun fillRect(x: Int, y: Int, w: Int, h: Int, gray: Float) {
@@ -760,6 +829,15 @@ class DualRenderer {
             void main() {
                 float a = smoothstep(0.35, 0.75, texture2D(sMask, vMask).r);
                 gl_FragColor = vec4(texture2D(sTex, vTex).rgb, a);
+            }
+        """
+
+        private const val TEX_FRAGMENT_SHADER = """
+            precision mediump float;
+            varying vec2 vTex;
+            uniform sampler2D sTex;
+            void main() {
+                gl_FragColor = texture2D(sTex, vTex);
             }
         """
 

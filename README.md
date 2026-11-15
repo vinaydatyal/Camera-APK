@@ -45,6 +45,15 @@ the front and rear cameras record at the same time into a single video.
   if the phone is already very hot. If the phone overheats, battery drops to 4%, or storage is nearly
   full, recording stops and the video is saved safely.
 
+**Sound & ride data**
+- **🎙 Mic choice** (Dual/Vlog mode): phone mic, USB-C mic, wired mic or a **Bluetooth helmet/headset mic**.
+  Bluetooth mics record at call quality (16 kHz), which is clear for speech.
+- **🌬 Wind filter** (Video and Dual): Light or Strong. Right after a recording stops, the audio is cleaned
+  in the background (low-frequency wind rumble removed) and the file is updated; the video isn't re-encoded.
+  A foam/fur windscreen or helmet mic still helps the most.
+- **📍 Speed overlay** (Dual/Vlog mode): live GPS speed (km/h), trip distance for the current recording,
+  time and place name, burned into the video, preview and snapshots. Move it to any corner.
+
 **Export for social media**
 - Tap the **⇪** button next to the gallery thumbnail (or long-press the thumbnail)
 - Pick the last capture or any photo/video from your gallery

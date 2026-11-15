@@ -272,6 +272,7 @@ class MainActivity : AppCompatActivity() {
         orientationListener.enable()
         handler.removeCallbacks(healthMonitor)
         handler.post(healthMonitor)
+        updateHud()
         if (installAfterPermission && Updater.canInstall(this)) {
             installAfterPermission = false
             downloadedApk?.let { launchInstaller(it) }
@@ -284,6 +285,7 @@ class MainActivity : AppCompatActivity() {
         orientationListener.disable()
         handler.removeCallbacks(healthMonitor)
         exitRideMode()
+        handler.post { updateHud() }
         savePrefs()
         cancelCountdown()
     }
@@ -385,6 +387,52 @@ class MainActivity : AppCompatActivity() {
                 feedback("snap")
             }
         }
+    }
+
+    // Mic, wind filter, speed overlay
+    private var micChoice = "phone"
+    private var windLevel = 0
+    private var overlayOn = false
+    private var overlayCorner = PipCorner.BOTTOM_LEFT
+    private var bluetoothMicActive = false
+    private var dualHasAudio = false
+    private val windFilter by lazy {
+        WindFilter(this) { _, ok ->
+            if (ok) Toast.makeText(this, "🌬 Wind noise reduced", Toast.LENGTH_SHORT).show()
+        }
+    }
+    private var hud: RideHud? = null
+    private val locationLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+            if (r.values.any { it }) updateHud()
+            else {
+                overlayOn = false
+                Toast.makeText(this, "Location permission is needed for the speed overlay", Toast.LENGTH_LONG).show()
+                refreshUi()
+            }
+        }
+
+    private fun hasLocationPermission() =
+        hasPermission(Manifest.permission.ACCESS_FINE_LOCATION) ||
+            hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+
+    /** Starts/stops GPS + overlay drawing as needed (dual mode, overlay on, app visible). */
+    private fun updateHud() {
+        val want = overlayOn && mode == Mode.DUAL && hasLocationPermission() &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+        if (want && hud == null) {
+            hud = RideHud(this) { bmp -> dualRenderer?.setOverlay(bmp) }.also {
+                it.setCounting(mediaRecorder != null)
+                it.start()
+            }
+        } else if (!want && hud != null) {
+            // Keep the overlay running during a recording even if briefly paused.
+            if (mediaRecorder != null && overlayOn) return
+            hud?.stop()
+            hud = null
+        }
+        if (!overlayOn || mode != Mode.DUAL) dualRenderer?.setOverlay(null)
+        dualRenderer?.overlayCorner = overlayCorner
     }
 
     private var rideAuto = false
@@ -545,6 +593,11 @@ class MainActivity : AppCompatActivity() {
         dualFullHd = prefs.getBoolean("dualFhd", false)
         dualFit = prefs.getBoolean("dualFit", false)
         rideAuto = prefs.getBoolean("rideAuto", true)
+        micChoice = prefs.getString("micChoice", "phone")!!
+        windLevel = prefs.getInt("wind", 0)
+        overlayOn = prefs.getBoolean("overlay", false)
+        overlayCorner = runCatching { PipCorner.valueOf(prefs.getString("overlayCorner", "BOTTOM_LEFT")!!) }
+            .getOrDefault(PipCorner.BOTTOM_LEFT)
         dualFrame = runCatching { DualFrame.valueOf(prefs.getString("dualFrame", "AUTO")!!) }
             .getOrDefault(DualFrame.AUTO)
         dualLayout = runCatching { DualLayout.valueOf(prefs.getString("dualLayout", "PIP")!!) }
@@ -566,6 +619,10 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("dualFhd", dualFullHd)
             .putBoolean("dualFit", dualFit)
             .putBoolean("rideAuto", rideAuto)
+            .putString("micChoice", micChoice)
+            .putInt("wind", windLevel)
+            .putBoolean("overlay", overlayOn)
+            .putString("overlayCorner", overlayCorner.name)
             .putString("dualFrame", dualFrame.name)
             .putString("dualLayout", dualLayout.name)
             .putString("pipCorner", pipCorner.name)
@@ -696,6 +753,7 @@ class MainActivity : AppCompatActivity() {
             observeCamera(activeCamera())
             updateTargetRotation()
         }
+        updateHud()
         refreshUi()
     }
 
@@ -1103,6 +1161,47 @@ class MainActivity : AppCompatActivity() {
             scheduleRideMode()
             refreshUi()
         }
+        b.btnWind.setOnClickListener {
+            windLevel = (windLevel + 1) % 3
+            if (windLevel > 0) {
+                Toast.makeText(
+                    this, "Wind filter cleans the audio right after each recording stops",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            refreshUi()
+        }
+        b.btnOverlay.setOnClickListener {
+            overlayOn = !overlayOn
+            if (overlayOn && !hasLocationPermission()) {
+                locationLauncher.launch(
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                )
+            }
+            updateHud()
+            refreshUi()
+        }
+        b.btnOverlayPos.setOnClickListener {
+            overlayCorner = PipCorner.entries[(overlayCorner.ordinal + 1) % PipCorner.entries.size]
+            dualRenderer?.overlayCorner = overlayCorner
+            refreshUi()
+        }
+        b.btnMicSource.setOnClickListener {
+            val mics = Mics.list(this)
+            if (mics.size == 1) {
+                micChoice = "phone"
+                Toast.makeText(
+                    this, "No external mic found. Connect a USB-C, wired or Bluetooth mic.",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                val i = mics.indexOfFirst { it.key == micChoice }
+                val next = mics[(i + 1) % mics.size]
+                micChoice = next.key
+                Toast.makeText(this, "Recording audio from: ${next.label}", Toast.LENGTH_SHORT).show()
+            }
+            refreshUi()
+        }
         b.btnExposure.setOnClickListener {
             b.exposurePanel.visibility =
                 if (b.exposurePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
@@ -1228,6 +1327,22 @@ class MainActivity : AppCompatActivity() {
         b.btnTimer.text = if (timerSeconds == 0) "⏱ Off" else "⏱ ${timerSeconds}s"
         active(b.btnTimer, timerSeconds > 0)
 
+        b.btnWind.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
+        b.btnWind.text = "🌬 Wind filter " + arrayOf("Off", "Light", "Strong")[windLevel]
+        active(b.btnWind, windLevel > 0)
+        b.btnOverlay.text = if (overlayOn) "📍 Speed overlay On" else "📍 Speed overlay Off"
+        active(b.btnOverlay, overlayOn)
+        b.btnOverlayPos.visibility = if (overlayOn) View.VISIBLE else View.GONE
+        b.btnOverlayPos.text = "Overlay " + when (overlayCorner) {
+            PipCorner.TOP_LEFT -> "↖"
+            PipCorner.TOP_RIGHT -> "↗"
+            PipCorner.BOTTOM_RIGHT -> "↘"
+            PipCorner.BOTTOM_LEFT -> "↙"
+        }
+        b.btnMicSource.text = "🎙 " + Mics.find(this, micChoice).label
+        active(b.btnMicSource, micChoice != "phone")
+        b.btnMicSource.isEnabled = !isRecording
+        b.btnOverlay.isEnabled = !isRecording
         b.btnRide.text = if (rideAuto) "🏍 Ride mode On" else "🏍 Ride mode Off"
         active(b.btnRide, rideAuto)
         b.btnRide.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
@@ -1441,10 +1556,23 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val audio = micOn && hasPermission(Manifest.permission.RECORD_AUDIO)
+        val mic = if (audio) Mics.find(this, micChoice) else null
+        if (mic?.bluetooth == true) {
+            Mics.startBluetooth(this)
+            bluetoothMicActive = true
+        }
         val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this)
         else @Suppress("DEPRECATION") MediaRecorder()
         try {
-            if (audio) mr.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+            if (audio) {
+                mr.setAudioSource(
+                    when {
+                        mic?.bluetooth == true -> MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                        mic?.device != null -> MediaRecorder.AudioSource.MIC
+                        else -> MediaRecorder.AudioSource.CAMCORDER
+                    }
+                )
+            }
             mr.setVideoSource(MediaRecorder.VideoSource.SURFACE)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setOutputFile(pfd.fileDescriptor)
@@ -1454,7 +1582,10 @@ class MainActivity : AppCompatActivity() {
             mr.setVideoEncodingBitRate(if (fullHd) 16_000_000 else 8_000_000)
             if (audio) {
                 mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                mr.setAudioSamplingRate(48_000)
+                mr.setAudioSamplingRate(if (mic?.bluetooth == true) 16_000 else 48_000)
+                if (mic?.device != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    mr.setPreferredDevice(mic.device)
+                }
                 mr.setAudioEncodingBitRate(128_000)
                 mr.setAudioChannels(1)
             }
@@ -1468,6 +1599,7 @@ class MainActivity : AppCompatActivity() {
             mr.release()
             runCatching { pfd.close() }
             contentResolver.delete(uri, null, null)
+            if (bluetoothMicActive) { Mics.stopBluetooth(this); bluetoothMicActive = false }
             Toast.makeText(this, "Could not start recording: ${e.message}", Toast.LENGTH_LONG).show()
             return
         }
@@ -1479,6 +1611,8 @@ class MainActivity : AppCompatActivity() {
         dualPausedMs = 0L
         b.recordTime.text = "● 00:00"
         handler.post(dualTicker)
+        hud?.setCounting(true)
+        dualHasAudio = audio
         refreshUi()
         onRecordingStateChanged()
     }
@@ -1487,6 +1621,7 @@ class MainActivity : AppCompatActivity() {
         val mr = mediaRecorder ?: return
         val pfd = dualPfd
         val uri = dualUri
+        val audio = dualHasAudio
         dualStopping = true
         mediaRecorder = null
         exitRideMode()
@@ -1520,6 +1655,9 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 dualStopping = false
                 recordingPaused = false
+                if (bluetoothMicActive) { Mics.stopBluetooth(this); bluetoothMicActive = false }
+                hud?.setCounting(false)
+                if (ok && uri != null && audio && windLevel > 0) windFilter.enqueue(uri, windLevel)
                 b.recordTime.text = "● 00:00"
                 if (ok && uri != null) setLastMedia(uri, true)
                 else Toast.makeText(this, "Recording too short or failed", Toast.LENGTH_SHORT).show()
@@ -1559,6 +1697,7 @@ class MainActivity : AppCompatActivity() {
                     val uri = event.outputResults.outputUri
                     if (!event.hasError() || uri != Uri.EMPTY) {
                         if (uri != Uri.EMPTY) setLastMedia(uri, true)
+                        if (uri != Uri.EMPTY && micOn && windLevel > 0) windFilter.enqueue(uri, windLevel)
                         if (event.hasError()) Log.w(TAG, "Recording finished with error ${event.error}")
                     } else {
                         Toast.makeText(this, "Recording failed (code ${event.error})", Toast.LENGTH_LONG).show()

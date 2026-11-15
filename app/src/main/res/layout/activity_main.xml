@@ -88,6 +88,7 @@
                 <TextView android:id="@+id/btnExposure" style="@style/Pill" android:text="± Exposure" />
                 <TextView android:id="@+id/btnMirror" style="@style/Pill" />
                 <TextView android:id="@+id/btnRide" style="@style/Pill" />
+                <TextView android:id="@+id/btnWind" style="@style/Pill" />
             </LinearLayout>
         </HorizontalScrollView>
 
@@ -198,6 +199,9 @@
                 <TextView android:id="@+id/btnLayout" style="@style/Pill" />
                 <TextView android:id="@+id/btnDualFrame" style="@style/Pill" />
                 <TextView android:id="@+id/btnDualFit" style="@style/Pill" />
+                <TextView android:id="@+id/btnOverlay" style="@style/Pill" />
+                <TextView android:id="@+id/btnOverlayPos" style="@style/Pill" />
+                <TextView android:id="@+id/btnMicSource" style="@style/Pill" />
                 <TextView android:id="@+id/btnCorner" style="@style/Pill" android:text="Move inset" />
                 <TextView android:id="@+id/btnPipSize" style="@style/Pill" />
                 <TextView android:id="@+id/btnSwap" style="@style/Pill" android:text="⇄ Swap" />
