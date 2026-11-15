@@ -270,6 +270,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         orientationListener.enable()
+        handler.removeCallbacks(healthMonitor)
+        handler.post(healthMonitor)
         if (installAfterPermission && Updater.canInstall(this)) {
             installAfterPermission = false
             downloadedApk?.let { launchInstaller(it) }
@@ -280,6 +282,8 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         orientationListener.disable()
+        handler.removeCallbacks(healthMonitor)
+        exitRideMode()
         savePrefs()
         cancelCountdown()
     }
@@ -292,6 +296,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { segmenter.close() }
+        runCatching { toneGen?.release() }
         analysisExecutor.shutdown()
         dualRenderer?.release()
         dualRenderer = null
@@ -302,13 +307,226 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-            keyCode == KeyEvent.KEYCODE_CAMERA
-        ) {
-            if (event.repeatCount == 0) onShutter()
-            return true
+        val action = when (keyCode) {
+            // Volume keys, camera key, Bluetooth shutter remotes
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA,
+            // Helmet intercoms, earphones and media remotes (play/pause button)
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK,
+            KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+            KeyEvent.KEYCODE_MEDIA_STOP -> RemoteAction.SHUTTER
+            KeyEvent.KEYCODE_MEDIA_NEXT -> RemoteAction.SNAPSHOT
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> RemoteAction.SWITCH
+            else -> null
+        } ?: return super.onKeyDown(keyCode, event)
+        if (event.repeatCount == 0) onRemote(action, keyCode)
+        return true
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = when (keyCode) {
+        KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA,
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_MEDIA_PLAY,
+        KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_NEXT,
+        KeyEvent.KEYCODE_MEDIA_PREVIOUS -> true
+        else -> super.onKeyUp(keyCode, event)
+    }
+
+    // ---------------------------------------------------------------- remote control & ride mode
+
+    private enum class RemoteAction { SHUTTER, SNAPSHOT, SWITCH }
+
+    private val toneGen by lazy {
+        runCatching { android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 90) }.getOrNull()
+    }
+
+    /** Short sounds (heard in a Bluetooth helmet) + vibration, so you know it worked without looking. */
+    private fun feedback(kind: String) {
+        val tone = when (kind) {
+            "start" -> android.media.ToneGenerator.TONE_PROP_BEEP
+            "stop" -> android.media.ToneGenerator.TONE_PROP_BEEP2
+            "snap" -> android.media.ToneGenerator.TONE_PROP_ACK
+            else -> android.media.ToneGenerator.TONE_SUP_ERROR
         }
-        return super.onKeyDown(keyCode, event)
+        runCatching { toneGen?.startTone(tone, if (kind == "warn") 600 else 200) }
+        val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION") getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+        }
+        val pattern = when (kind) {
+            "start" -> longArrayOf(0, 120)
+            "stop" -> longArrayOf(0, 90, 120, 90)
+            "snap" -> longArrayOf(0, 40)
+            else -> longArrayOf(0, 300, 150, 300, 150, 300)
+        }
+        runCatching { vib.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1)) }
+    }
+
+    private fun onRemote(action: RemoteAction, keyCode: Int) {
+        val isVolumeOrCamera = keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_CAMERA
+        when (action) {
+            RemoteAction.SHUTTER -> {
+                val wasRecording = isRecording
+                onShutter()
+                if (!isVolumeOrCamera) {
+                    when {
+                        mode == Mode.PHOTO -> feedback("snap")
+                        wasRecording -> feedback("stop")
+                        else -> feedback("start")
+                    }
+                }
+            }
+            RemoteAction.SNAPSHOT -> {
+                if (mode == Mode.DUAL) takeDualSnapshot() else if (mode == Mode.PHOTO) takePhoto() else return
+                feedback("snap")
+            }
+            RemoteAction.SWITCH -> {
+                switchCamera()
+                feedback("snap")
+            }
+        }
+    }
+
+    private var rideAuto = false
+    private var rideActive = false
+    private val rideEnter = Runnable { if (rideAuto && isRecording) enterRideMode() }
+    private val rideTicker = object : Runnable {
+        override fun run() {
+            if (!rideActive) return
+            b.rideText.text = b.recordTime.text
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    /** Restarts the "go dark after a few seconds without touches" timer while recording. */
+    private fun scheduleRideMode() {
+        handler.removeCallbacks(rideEnter)
+        if (rideAuto && isRecording && !rideActive) handler.postDelayed(rideEnter, RIDE_DELAY_MS)
+    }
+
+    private fun enterRideMode() {
+        if (rideActive) return
+        rideActive = true
+        b.rideOverlay.visibility = View.VISIBLE
+        window.attributes = window.attributes.apply { screenBrightness = 0.01f }
+        dualRenderer?.displayPaused = true
+        handler.post(rideTicker)
+    }
+
+    private fun exitRideMode() {
+        handler.removeCallbacks(rideEnter)
+        if (!rideActive) return
+        rideActive = false
+        b.rideOverlay.visibility = View.GONE
+        window.attributes = window.attributes.apply {
+            screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        }
+        dualRenderer?.displayPaused = false
+        handler.removeCallbacks(rideTicker)
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            if (rideActive) {
+                // First tap only wakes the screen.
+                exitRideMode()
+                scheduleRideMode()
+                return true
+            }
+            scheduleRideMode()
+        }
+        if (rideActive) return true
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /** Called whenever recording starts or stops. */
+    private fun onRecordingStateChanged() {
+        if (isRecording) scheduleRideMode() else exitRideMode()
+    }
+
+    // ---------------------------------------------------------------- heat, battery & storage
+
+    private var lastWarning = ""
+    private val healthMonitor = object : Runnable {
+        override fun run() {
+            checkHealth()
+            handler.postDelayed(this, if (isRecording) 5_000 else 15_000)
+        }
+    }
+
+    private fun thermalStatus(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            (getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).currentThermalStatus
+        } else 0
+
+    private fun freeStorageBytes(): Long = runCatching {
+        android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path).availableBytes
+    }.getOrDefault(Long.MAX_VALUE)
+
+    private data class Health(val warnings: List<String>, val stopReason: String?)
+
+    private fun readHealth(): Health {
+        val warnings = mutableListOf<String>()
+        var stop: String? = null
+
+        val thermal = thermalStatus()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            when {
+                thermal >= android.os.PowerManager.THERMAL_STATUS_CRITICAL ->
+                    stop = "Phone is overheating"
+                thermal >= android.os.PowerManager.THERMAL_STATUS_SEVERE ->
+                    warnings += "🔥 Phone very hot – shade it or use 720p"
+                thermal >= android.os.PowerManager.THERMAL_STATUS_MODERATE ->
+                    warnings += "🌡 Phone getting warm"
+            }
+        }
+
+        val battery = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (battery != null) {
+            val level = battery.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+            val scale = battery.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+            val status = battery.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+            val charging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == android.os.BatteryManager.BATTERY_STATUS_FULL
+            val pct = if (level >= 0 && scale > 0) level * 100 / scale else 100
+            if (!charging) {
+                if (pct <= 4) stop = stop ?: "Battery almost empty"
+                else if (pct <= 15) warnings += "🔋 Battery $pct%"
+            }
+        }
+
+        val free = freeStorageBytes()
+        if (free < MIN_FREE_BYTES) stop = stop ?: "Storage almost full"
+        else if (free < LOW_FREE_BYTES) {
+            warnings += String.format(Locale.US, "💾 %.1f GB free", free / 1e9)
+        }
+        return Health(warnings, stop)
+    }
+
+    private fun checkHealth() {
+        val health = readHealth()
+        val text = (health.warnings + listOfNotNull(health.stopReason)).joinToString("  ·  ")
+        b.warningBanner.text = text
+        b.warningBanner.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        if (text.isNotEmpty() && text != lastWarning && isRecording) feedback("warn")
+        lastWarning = text
+
+        val reason = health.stopReason
+        if (reason != null && isRecording) {
+            // Stop cleanly so the video is saved, rather than the phone killing the camera.
+            exitRideMode()
+            if (mediaRecorder != null) stopDualRecording() else stopRecording()
+            feedback("warn")
+            Toast.makeText(this, "$reason – recording stopped and saved", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Returns false (with a message) if it isn't safe to start recording. */
+    private fun canStartRecording(): Boolean {
+        val reason = readHealth().stopReason ?: return true
+        feedback("warn")
+        Toast.makeText(this, "$reason – can't start recording", Toast.LENGTH_LONG).show()
+        return false
     }
 
     private fun hasPermission(p: String) =
@@ -326,6 +544,7 @@ class MainActivity : AppCompatActivity() {
         timerSeconds = prefs.getInt("timer", 0)
         dualFullHd = prefs.getBoolean("dualFhd", false)
         dualFit = prefs.getBoolean("dualFit", false)
+        rideAuto = prefs.getBoolean("rideAuto", true)
         dualFrame = runCatching { DualFrame.valueOf(prefs.getString("dualFrame", "AUTO")!!) }
             .getOrDefault(DualFrame.AUTO)
         dualLayout = runCatching { DualLayout.valueOf(prefs.getString("dualLayout", "PIP")!!) }
@@ -346,6 +565,7 @@ class MainActivity : AppCompatActivity() {
             .putInt("timer", timerSeconds)
             .putBoolean("dualFhd", dualFullHd)
             .putBoolean("dualFit", dualFit)
+            .putBoolean("rideAuto", rideAuto)
             .putString("dualFrame", dualFrame.name)
             .putString("dualLayout", dualLayout.name)
             .putString("pipCorner", pipCorner.name)
@@ -409,8 +629,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Output size for dual recordings and snapshots, matching the on-screen frame. */
-    private fun dualCanvasSize(): Pair<Int, Int> {
-        val short = if (dualFullHd) 1080 else 720
+    private fun dualCanvasSize(fullHd: Boolean = dualFullHd): Pair<Int, Int> {
+        val short = if (fullHd) 1080 else 720
         val aspect = dualFrame.aspect(screenPortrait = b.root.width <= b.root.height)
         fun even(v: Float) = (v / 2f).roundToInt() * 2
         return if (aspect <= 1f) short to even(short / aspect) else even(short * aspect) to short
@@ -872,6 +1092,17 @@ class MainActivity : AppCompatActivity() {
             applyDualSettings()
             if (mode == Mode.VIDEO) bindCamera() else refreshUi()
         }
+        b.btnRide.setOnClickListener {
+            rideAuto = !rideAuto
+            Toast.makeText(
+                this,
+                if (rideAuto) "Ride mode on: screen goes dark ${RIDE_DELAY_MS / 1000}s after recording starts. Tap to wake."
+                else "Ride mode off",
+                Toast.LENGTH_SHORT
+            ).show()
+            scheduleRideMode()
+            refreshUi()
+        }
         b.btnExposure.setOnClickListener {
             b.exposurePanel.visibility =
                 if (b.exposurePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
@@ -997,6 +1228,9 @@ class MainActivity : AppCompatActivity() {
         b.btnTimer.text = if (timerSeconds == 0) "⏱ Off" else "⏱ ${timerSeconds}s"
         active(b.btnTimer, timerSeconds > 0)
 
+        b.btnRide.text = if (rideAuto) "🏍 Ride mode On" else "🏍 Ride mode Off"
+        active(b.btnRide, rideAuto)
+        b.btnRide.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
         b.btnGrid.text = "# Grid"
         active(b.btnGrid, gridOn)
         b.gridOverlay.visibility = if (gridOn) View.VISIBLE else View.GONE
@@ -1188,7 +1422,13 @@ class MainActivity : AppCompatActivity() {
     private fun startDualRecording() {
         val renderer = dualRenderer ?: return
         if (dualCameras.isEmpty()) return
-        val (w, h) = dualCanvasSize()
+        if (!canStartRecording()) return
+        // When the phone is already hot, record at 720p to reduce load.
+        val hot = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            thermalStatus() >= android.os.PowerManager.THERMAL_STATUS_SEVERE
+        val fullHd = dualFullHd && !hot
+        if (dualFullHd && hot) Toast.makeText(this, "Phone is hot – recording at 720p", Toast.LENGTH_LONG).show()
+        val (w, h) = dualCanvasSize(fullHd)
         val values = MediaSaver.videoValues(MediaSaver.fileName("VLOG"))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             values.put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -1211,7 +1451,7 @@ class MainActivity : AppCompatActivity() {
             mr.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             mr.setVideoSize(w, h)
             mr.setVideoFrameRate(30)
-            mr.setVideoEncodingBitRate(if (dualFullHd) 16_000_000 else 8_000_000)
+            mr.setVideoEncodingBitRate(if (fullHd) 16_000_000 else 8_000_000)
             if (audio) {
                 mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 mr.setAudioSamplingRate(48_000)
@@ -1240,6 +1480,7 @@ class MainActivity : AppCompatActivity() {
         b.recordTime.text = "● 00:00"
         handler.post(dualTicker)
         refreshUi()
+        onRecordingStateChanged()
     }
 
     private fun stopDualRecording() {
@@ -1248,6 +1489,7 @@ class MainActivity : AppCompatActivity() {
         val uri = dualUri
         dualStopping = true
         mediaRecorder = null
+        exitRideMode()
         dualPfd = null
         dualUri = null
         handler.removeCallbacks(dualTicker)
@@ -1283,6 +1525,7 @@ class MainActivity : AppCompatActivity() {
                 else Toast.makeText(this, "Recording too short or failed", Toast.LENGTH_SHORT).show()
                 updateTargetRotation()
                 refreshUi()
+                onRecordingStateChanged()
             }
         }
     }
@@ -1290,6 +1533,7 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun startRecording() {
         val vc = videoCapture ?: return
+        if (!canStartRecording()) return
         updateTargetRotation()
         val options = MediaStoreOutputOptions.Builder(
             contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -1301,7 +1545,7 @@ class MainActivity : AppCompatActivity() {
         recordingPaused = false
         recording = pending.start(uiExecutor) { event ->
             when (event) {
-                is VideoRecordEvent.Start -> refreshUi()
+                is VideoRecordEvent.Start -> { refreshUi(); onRecordingStateChanged() }
                 is VideoRecordEvent.Status -> {
                     val secs = TimeUnit.NANOSECONDS.toSeconds(event.recordingStats.recordedDurationNanos)
                     val dot = if (recordingPaused) "❚❚" else "●"
@@ -1321,6 +1565,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     b.recordTime.text = "● 00:00"
                     refreshUi()
+                    onRecordingStateChanged()
                 }
             }
         }
@@ -1578,5 +1823,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "VlogCam"
+        private const val RIDE_DELAY_MS = 8_000L
+        private const val MIN_FREE_BYTES = 300L * 1024 * 1024
+        private const val LOW_FREE_BYTES = 2L * 1024 * 1024 * 1024
     }
 }

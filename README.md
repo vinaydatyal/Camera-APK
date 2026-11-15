@@ -33,6 +33,18 @@ the front and rear cameras record at the same time into a single video.
 - Volume buttons act as the shutter
 - Works in portrait and landscape and follows the phone's auto-rotate setting
 
+**On the bike**
+- **Helmet / Bluetooth remote:** the play/pause button on a helmet intercom, earphones or media remote
+  starts and stops recording (or takes a photo). Next = snapshot, Previous = swap/switch camera.
+  Volume keys and cheap Bluetooth selfie shutters work too. You hear a beep and feel a vibration on
+  start (1 beep), stop (2 beeps) and snapshot.
+- **Ride mode** (🏍 button, on by default): 8 seconds after recording starts the screen goes black
+  to save battery and heat, while recording continues. Tap once to wake.
+- **Heat, battery and storage protection:** a red banner warns when the phone is getting hot, battery is
+  15% or less, or storage is low (with warning beeps while recording). Dual recordings start at 720p
+  if the phone is already very hot. If the phone overheats, battery drops to 4%, or storage is nearly
+  full, recording stops and the video is saved safely.
+
 **Export for social media**
 - Tap the **⇪** button next to the gallery thumbnail (or long-press the thumbnail)
 - Pick the last capture or any photo/video from your gallery

@@ -87,6 +87,7 @@
                 <TextView android:id="@+id/btnMic" style="@style/Pill" />
                 <TextView android:id="@+id/btnExposure" style="@style/Pill" android:text="± Exposure" />
                 <TextView android:id="@+id/btnMirror" style="@style/Pill" />
+                <TextView android:id="@+id/btnRide" style="@style/Pill" />
             </LinearLayout>
         </HorizontalScrollView>
 
@@ -101,6 +102,25 @@
             android:paddingEnd="12dp"
             android:text="● 00:00"
             android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/warningBanner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/record_pill"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="6dp"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
@@ -322,5 +342,34 @@
                     android:textSize="26sp" />
             </LinearLayout>
         </LinearLayout>
+    </LinearLayout>
+
+    <!-- Ride mode: black screen while recording continues; tap to wake -->
+    <LinearLayout
+        android:id="@+id/rideOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:focusable="false"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/rideText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#55FF3B30"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Ride mode · tap to wake"
+            android:textColor="#33FFFFFF"
+            android:textSize="13sp" />
     </LinearLayout>
 </FrameLayout>

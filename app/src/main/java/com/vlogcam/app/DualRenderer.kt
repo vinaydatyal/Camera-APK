@@ -59,6 +59,8 @@ class DualRenderer {
     @Volatile var displayRotationDeg = 0
     /** Fit: show each camera's whole picture over a blurred background instead of cropping. */
     @Volatile var fit = false
+    /** Skip drawing to the screen (ride mode) while still feeding the encoder. */
+    @Volatile var displayPaused = false
     private val isFront = BooleanArray(2)
 
     private var eglDisplay = EGL14.EGL_NO_DISPLAY
@@ -384,7 +386,7 @@ class DualRenderer {
             stream.st.getTransformMatrix(stream.matrix)
             stream.hasFrame = true
 
-            if (displaySurface != EGL14.EGL_NO_SURFACE && displayW > 0 && displayH > 0) {
+            if (!displayPaused && displaySurface != EGL14.EGL_NO_SURFACE && displayW > 0 && displayH > 0) {
                 makeCurrent(displaySurface)
                 drawScene(displayW, displayH, displayRotationDeg)
                 EGL14.eglSwapBuffers(eglDisplay, displaySurface)
