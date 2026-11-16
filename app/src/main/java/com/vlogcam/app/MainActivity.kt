@@ -135,8 +135,7 @@ class MainActivity : AppCompatActivity() {
             val now = System.currentTimeMillis()
             val paused = dualPausedMs + if (recordingPaused) now - dualPauseStartMs else 0L
             val secs = (now - dualStartMs - paused) / 1000
-            val dot = if (recordingPaused) "❚❚" else "●"
-            b.recordTime.text = String.format(Locale.US, "%s %02d:%02d", dot, secs / 60, secs % 60)
+            b.recordTime.text = recordLabel(secs)
             handler.postDelayed(this, 500)
         }
     }
@@ -363,6 +362,8 @@ class MainActivity : AppCompatActivity() {
             "start" -> android.media.ToneGenerator.TONE_PROP_BEEP
             "stop" -> android.media.ToneGenerator.TONE_PROP_BEEP2
             "snap" -> android.media.ToneGenerator.TONE_PROP_ACK
+            "fast_on" -> android.media.ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD
+            "fast_off" -> android.media.ToneGenerator.TONE_PROP_NACK
             else -> android.media.ToneGenerator.TONE_SUP_ERROR
         }
         runCatching { toneGen?.startTone(tone, if (kind == "warn") 600 else 200) }
@@ -375,6 +376,8 @@ class MainActivity : AppCompatActivity() {
             "start" -> longArrayOf(0, 120)
             "stop" -> longArrayOf(0, 90, 120, 90)
             "snap" -> longArrayOf(0, 40)
+            "fast_on" -> longArrayOf(0, 60, 80, 60, 80, 60)
+            "fast_off" -> longArrayOf(0, 200)
             else -> longArrayOf(0, 300, 150, 300, 150, 300)
         }
         runCatching { vib.vibrate(android.os.VibrationEffect.createWaveform(pattern, -1)) }
@@ -396,6 +399,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             RemoteAction.SNAPSHOT -> {
+                // While recording, "Next" (a double-press on most intercoms) marks fast-forward parts.
+                if (isRecording && mode != Mode.PHOTO) {
+                    toggleFastForward()
+                    return
+                }
                 if (mode == Mode.DUAL) takeDualSnapshot() else if (mode == Mode.PHOTO) takePhoto() else return
                 feedback("snap")
             }
@@ -455,6 +463,97 @@ class MainActivity : AppCompatActivity() {
         // Never leave a stale (frozen) panel on screen when tracking isn't running.
         if (hud == null) dualRenderer?.setOverlay(null)
         dualRenderer?.overlayCorner = overlayCorner
+    }
+
+    // ---------------------------------------------------------------- fast-forward sections
+
+    private var fastSpeed = 8
+    private var fastActive = false
+    private var fastStartMs = 0L
+    private val fastRanges = mutableListOf<Pair<Long, Long>>()
+    private var segmentBaseMs = 0L
+    private var cameraxRecordedMs = 0L
+    private var cameraxPendingRanges: List<Pair<Long, Long>>? = null
+    private val bgExporter by lazy { Exporter(this) }
+    private val speedQueue = ArrayDeque<Pair<Uri, List<Pair<Long, Long>>>>()
+    private var speedBusy = false
+
+    private fun recordLabel(secs: Long): String {
+        val dot = if (recordingPaused) "❚❚" else "●"
+        val base = String.format(Locale.US, "%s %02d:%02d", dot, secs / 60, secs % 60)
+        return if (fastActive) "$base   ⏩ ${fastSpeed}x" else base
+    }
+
+    /** Recorded time (excluding pauses) in the current file, in ms. */
+    private fun segmentMs(): Long {
+        if (mediaRecorder != null) {
+            val now = System.currentTimeMillis()
+            val paused = dualPausedMs + if (recordingPaused) now - dualPauseStartMs else 0L
+            return now - dualStartMs - paused - segmentBaseMs
+        }
+        return cameraxRecordedMs
+    }
+
+    private fun resetFastForward() {
+        fastActive = false
+        fastStartMs = 0L
+        fastRanges.clear()
+        segmentBaseMs = 0L
+        cameraxRecordedMs = 0L
+    }
+
+    private fun closeFastRange(endMs: Long) {
+        if (endMs - fastStartMs >= 1500) fastRanges += fastStartMs to endMs
+    }
+
+    /** Ends any open section and returns this file's ranges, leaving the list empty. */
+    private fun takeFastRanges(): List<Pair<Long, Long>> {
+        if (fastActive) closeFastRange(segmentMs())
+        fastActive = false
+        return fastRanges.toList().also { fastRanges.clear() }
+    }
+
+    private fun toggleFastForward() {
+        if (!isRecording || dualStopping) {
+            Toast.makeText(this, "Start recording, then tap ⏩ over the parts to speed up", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (fastActive) {
+            closeFastRange(segmentMs())
+            fastActive = false
+        } else {
+            fastStartMs = segmentMs()
+            fastActive = true
+        }
+        feedback(if (fastActive) "fast_on" else "fast_off")
+        refreshUi()
+    }
+
+    /** After a file is saved: wind filter (in place), then the fast-forward copy if marked. */
+    private fun postProcess(uri: Uri, audio: Boolean, ranges: List<Pair<Long, Long>>) {
+        val speedJob = {
+            if (ranges.isNotEmpty()) {
+                speedQueue.add(uri to ranges)
+                runSpeedQueue()
+            }
+        }
+        if (audio && windLevel > 0) windFilter.enqueue(uri, windLevel) { speedJob() } else speedJob()
+    }
+
+    private fun runSpeedQueue() {
+        if (speedBusy) return
+        val (uri, ranges) = speedQueue.removeFirstOrNull() ?: return
+        speedBusy = true
+        bgExporter.speedUp(uri, ranges, fastSpeed.toFloat(), {}) { out, error ->
+            speedBusy = false
+            if (out != null) {
+                Toast.makeText(this, "⏩ Fast-forward version saved (Movies/VlogCam/Exports)", Toast.LENGTH_LONG).show()
+                setLastMedia(out, true)
+            } else {
+                Toast.makeText(this, "Fast-forward failed: ${error ?: "unknown error"}", Toast.LENGTH_LONG).show()
+            }
+            runSpeedQueue()
+        }
     }
 
     private var rideAuto = false
@@ -615,6 +714,7 @@ class MainActivity : AppCompatActivity() {
         dualFullHd = prefs.getBoolean("dualFhd", false)
         dualFit = prefs.getBoolean("dualFit", false)
         rideAuto = prefs.getBoolean("rideAuto", true)
+        fastSpeed = prefs.getInt("fastSpeed", 8)
         micChoice = prefs.getString("micChoice", "phone")!!
         windLevel = prefs.getInt("wind", 0)
         overlayOn = prefs.getBoolean("overlay", false)
@@ -641,6 +741,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("dualFhd", dualFullHd)
             .putBoolean("dualFit", dualFit)
             .putBoolean("rideAuto", rideAuto)
+            .putInt("fastSpeed", fastSpeed)
             .putString("micChoice", micChoice)
             .putInt("wind", windLevel)
             .putBoolean("overlay", overlayOn)
@@ -1066,7 +1167,10 @@ class MainActivity : AppCompatActivity() {
                     marginStart = (4 * density).roundToInt()
                     marginEnd = (4 * density).roundToInt()
                 }
-                setOnClickListener { activeCamera()?.cameraControl?.setZoomRatio(s) }
+                setOnClickListener {
+                    activeCamera()?.cameraControl?.setZoomRatio(s)
+                    showZoomSlider()
+                }
             }
             b.zoomChips.addView(tv)
         }
@@ -1126,6 +1230,7 @@ class MainActivity : AppCompatActivity() {
                     val ratio = (z.zoomRatio * detector.scaleFactor)
                         .coerceIn(z.minZoomRatio, z.maxZoomRatio)
                     cam.cameraControl.setZoomRatio(ratio)
+                    showZoomSlider()
                     return true
                 }
             })
@@ -1276,6 +1381,12 @@ class MainActivity : AppCompatActivity() {
             }
             refreshUi()
         }
+        b.btnSettings.setOnClickListener { showSettingsSheet() }
+        b.btnFast.setOnClickListener { toggleFastForward() }
+        b.btnFastSpeed.setOnClickListener {
+            fastSpeed = when (fastSpeed) { 4 -> 8; 8 -> 16; 16 -> 32; else -> 4 }
+            refreshUi()
+        }
         b.btnExposure.setOnClickListener {
             b.exposurePanel.visibility =
                 if (b.exposurePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
@@ -1293,29 +1404,18 @@ class MainActivity : AppCompatActivity() {
             if (fromUser) activeCamera()?.cameraControl?.setLinearZoom(value)
         })
         b.zoomSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
-            override fun onStartTrackingTouch(slider: Slider) { zoomSliderDragging = true }
-            override fun onStopTrackingTouch(slider: Slider) { zoomSliderDragging = false }
+            override fun onStartTrackingTouch(slider: Slider) {
+                zoomSliderDragging = true
+                handler.removeCallbacks(hideZoomRow)
+            }
+            override fun onStopTrackingTouch(slider: Slider) {
+                zoomSliderDragging = false
+                showZoomSlider()
+            }
         })
 
         // Dual controls
-        b.btnLayout.setOnClickListener {
-            val old = dualLayout
-            var next = DualLayout.entries[(old.ordinal + 1) % DualLayout.entries.size]
-            if (isRecording) {
-                // Cutout needs the camera set up differently, so it can't be toggled mid-recording.
-                if (old == DualLayout.CUTOUT || old == DualLayout.SOLO) {
-                    Toast.makeText(this, "Stop recording to change this layout", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-                while (next == DualLayout.CUTOUT || next == DualLayout.SOLO) {
-                    next = DualLayout.entries[(next.ordinal + 1) % DualLayout.entries.size]
-                }
-            }
-            dualLayout = next
-            applyDualSettings()
-            val needsRebind = { l: DualLayout -> l == DualLayout.CUTOUT || l == DualLayout.SOLO }
-            if (needsRebind(old) || needsRebind(next)) bindCamera() else refreshUi()
-        }
+        b.btnLayout.setOnClickListener { showLayoutPicker() }
         b.btnCorner.setOnClickListener {
             pipCorner = PipCorner.entries[(pipCorner.ordinal + 1) % PipCorner.entries.size]
             applyDualSettings()
@@ -1501,6 +1601,15 @@ class MainActivity : AppCompatActivity() {
             }
         )
         b.btnSnapshot.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
+        // While recording, the left side holds Pause + Fast-forward instead of gallery/export.
+        val recControls = isRecording && mode != Mode.PHOTO
+        b.thumbnail.visibility = if (recControls) View.GONE else View.VISIBLE
+        b.btnExport.visibility = if (recControls) View.GONE else View.VISIBLE
+        b.btnFast.visibility = if (recControls) View.VISIBLE else View.GONE
+        b.btnFast.setBackgroundResource(if (fastActive) R.drawable.circle_button_active else R.drawable.circle_button)
+        b.btnFast.setTextColor(if (fastActive) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
+        b.btnFastSpeed.text = "⏩ Fast-forward speed ${fastSpeed}x"
+        b.btnSettings.visibility = if (isRecording) View.GONE else View.VISIBLE
         b.btnPause.visibility = if (isRecording) View.VISIBLE else View.GONE
         b.btnPause.text = if (recordingPaused) "▶" else "❚❚"
         val switchLocked = isRecording && mode != Mode.DUAL
@@ -1707,6 +1816,7 @@ class MainActivity : AppCompatActivity() {
         handler.post(dualTicker)
         hud?.setCounting(true)
         dualHasAudio = audio
+        resetFastForward()
         refreshUi()
         onRecordingStateChanged()
     }
@@ -1755,6 +1865,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onNextSegmentStarted() {
+        // Fast-forward sections belong to the file they were marked in.
+        val wasFast = fastActive
+        val oldRanges = takeFastRanges()
+        segmentBaseMs += segmentMs()
+        if (wasFast) {
+            fastActive = true
+            fastStartMs = 0L
+        }
         val oldUri = dualUri
         val oldPfd = dualPfd
         dualUri = dualNextUri
@@ -1762,12 +1880,13 @@ class MainActivity : AppCompatActivity() {
         dualNextUri = null
         dualNextPfd = null
         val audio = dualHasAudio
+        val ranges = takeFastRanges()
         ioExecutor.execute {
             finalizeEntry(oldUri, oldPfd, true)
             runOnUiThread {
                 if (oldUri != null) {
                     setLastMedia(oldUri, true)
-                    if (audio && windLevel > 0) windFilter.enqueue(oldUri, windLevel)
+                    postProcess(oldUri, audio, oldRanges)
                 }
             }
         }
@@ -1807,7 +1926,7 @@ class MainActivity : AppCompatActivity() {
                 recordingPaused = false
                 if (bluetoothMicActive) { Mics.stopBluetooth(this); bluetoothMicActive = false }
                 hud?.setCounting(false)
-                if (ok && uri != null && audio && windLevel > 0) windFilter.enqueue(uri, windLevel)
+                if (ok && uri != null) postProcess(uri, audio, ranges)
                 b.recordTime.text = "● 00:00"
                 if (ok && uri != null) setLastMedia(uri, true)
                 else Toast.makeText(this, "Recording too short or failed", Toast.LENGTH_SHORT).show()
@@ -1831,13 +1950,15 @@ class MainActivity : AppCompatActivity() {
         if (micOn && hasPermission(Manifest.permission.RECORD_AUDIO)) pending = pending.withAudioEnabled()
 
         recordingPaused = false
+        resetFastForward()
+        cameraxPendingRanges = null
         recording = pending.start(uiExecutor) { event ->
             when (event) {
                 is VideoRecordEvent.Start -> { refreshUi(); onRecordingStateChanged() }
                 is VideoRecordEvent.Status -> {
+                    cameraxRecordedMs = event.recordingStats.recordedDurationNanos / 1_000_000
                     val secs = TimeUnit.NANOSECONDS.toSeconds(event.recordingStats.recordedDurationNanos)
-                    val dot = if (recordingPaused) "❚❚" else "●"
-                    b.recordTime.text = String.format(Locale.US, "%s %02d:%02d", dot, secs / 60, secs % 60)
+                    b.recordTime.text = recordLabel(secs)
                 }
                 is VideoRecordEvent.Pause -> { recordingPaused = true; refreshUi() }
                 is VideoRecordEvent.Resume -> { recordingPaused = false; refreshUi() }
@@ -1847,7 +1968,9 @@ class MainActivity : AppCompatActivity() {
                     val uri = event.outputResults.outputUri
                     if (!event.hasError() || uri != Uri.EMPTY) {
                         if (uri != Uri.EMPTY) setLastMedia(uri, true)
-                        if (uri != Uri.EMPTY && micOn && windLevel > 0) windFilter.enqueue(uri, windLevel)
+                        val ranges = cameraxPendingRanges ?: takeFastRanges()
+                        cameraxPendingRanges = null
+                        if (uri != Uri.EMPTY) postProcess(uri, micOn, ranges)
                         if (event.hasError()) Log.w(TAG, "Recording finished with error ${event.error}")
                     } else {
                         Toast.makeText(this, "Recording failed (code ${event.error})", Toast.LENGTH_LONG).show()
@@ -1862,6 +1985,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopRecording() {
+        if (recording != null && cameraxPendingRanges == null) cameraxPendingRanges = takeFastRanges()
         recording?.stop()
     }
 
@@ -1987,6 +2111,194 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Toast.makeText(this, "Could not open installer: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    // ---------------------------------------------------------------- settings sheet & pickers
+
+    private val hideZoomRow = Runnable { b.zoomRow.visibility = View.GONE }
+
+    private fun showZoomSlider() {
+        b.zoomRow.visibility = View.VISIBLE
+        handler.removeCallbacks(hideZoomRow)
+        handler.postDelayed(hideZoomRow, 3000)
+    }
+
+    private class SettingRow(
+        val section: String,
+        val title: String,
+        val source: TextView,
+        val value: () -> String,
+        val closesSheet: Boolean = false,
+    )
+
+    /** Settings grouped into sections; each row mirrors (and clicks) a hidden control. */
+    private fun showSettingsSheet() {
+        refreshUi()
+        val rows = listOf(
+            SettingRow("Camera", "Grid lines", b.btnGrid, { if (gridOn) "On" else "Off" }),
+            SettingRow("Camera", "Video quality", b.btnQuality, { qualityLabel(preferredQuality) }),
+            SettingRow("Camera", "Photo style", b.btnEffect, { extensionLabel(extensionMode) }),
+            SettingRow("Camera", "Exposure (brightness)", b.btnExposure, { "Adjust" }, closesSheet = true),
+            SettingRow("Camera", "Mirror front camera", b.btnMirror, { if (mirrorFront) "On" else "Off" }),
+            SettingRow("Dual / Vlog", "Recording quality", b.btnDualQuality, { if (dualFullHd) "1080p" else "720p" }),
+            SettingRow("Sound", "Microphone", b.btnMicSource, { Mics.find(this, micChoice).label }),
+            SettingRow("Sound", "Wind filter", b.btnWind, { arrayOf("Off", "Light", "Strong")[windLevel] }),
+            SettingRow("Ride", "Ride mode (dark screen)", b.btnRide, { if (rideAuto) "On" else "Off" }),
+            SettingRow("Ride", "Speed overlay", b.btnOverlay, { if (overlayOn) "On" else "Off" }),
+            SettingRow("Ride", "Overlay position", b.btnOverlayPos, {
+                when (overlayCorner) {
+                    PipCorner.TOP_LEFT -> "Top left"
+                    PipCorner.TOP_RIGHT -> "Top right"
+                    PipCorner.BOTTOM_RIGHT -> "Bottom right"
+                    PipCorner.BOTTOM_LEFT -> "Bottom left"
+                }
+            }),
+            SettingRow("Ride", "Fast-forward speed", b.btnFastSpeed, { "${fastSpeed}x" }),
+        )
+        val dp = resources.displayMetrics.density
+        val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val list = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding((20 * dp).toInt(), (8 * dp).toInt(), (20 * dp).toInt(), (24 * dp).toInt())
+        }
+        list.addView(TextView(this).apply {
+            text = "Settings"
+            textSize = 20f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(0, (8 * dp).toInt(), 0, (4 * dp).toInt())
+        })
+        var lastSection = ""
+        for (row in rows) {
+            if (row.source.visibility != View.VISIBLE) continue
+            if (row.section != lastSection) {
+                lastSection = row.section
+                list.addView(TextView(this).apply {
+                    text = row.section.uppercase()
+                    textSize = 12f
+                    letterSpacing = 0.12f
+                    setTextColor(0xFFFFD54F.toInt())
+                    setPadding(0, (18 * dp).toInt(), 0, (6 * dp).toInt())
+                })
+            }
+            val value = TextView(this).apply {
+                text = row.value()
+                textSize = 15f
+                setTextColor(0xFFFFD54F.toInt())
+            }
+            val line = android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = (52 * dp).toInt()
+                isClickable = true
+                isFocusable = true
+                val ta = obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground))
+                background = ta.getDrawable(0)
+                ta.recycle()
+                addView(TextView(this@MainActivity).apply {
+                    text = row.title
+                    textSize = 16f
+                    setTextColor(0xFFFFFFFF.toInt())
+                }, android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                addView(value)
+                setOnClickListener {
+                    if (!row.source.isEnabled) {
+                        Toast.makeText(this@MainActivity, "Not available while recording", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    row.source.performClick()
+                    if (row.closesSheet) sheet.dismiss() else value.text = row.value()
+                }
+            }
+            list.addView(line)
+        }
+        list.addView(TextView(this).apply {
+            text = "❓  Remote buttons & gestures"
+            textSize = 16f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(0, (22 * dp).toInt(), 0, (8 * dp).toInt())
+            setOnClickListener { showHelp() }
+        })
+        sheet.setContentView(android.widget.ScrollView(this).apply { addView(list) })
+        sheet.show()
+    }
+
+    private fun showHelp() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Remote buttons & gestures")
+            .setMessage(
+                "Helmet intercom / Bluetooth remote\n" +
+                    "• Play/Pause: start or stop recording (photo in Photo mode)\n" +
+                    "• Next (double-press on most intercoms): while recording, fast-forward on/off; " +
+                    "otherwise a snapshot\n" +
+                    "• Previous (triple-press): swap cameras\n" +
+                    "• Volume buttons: shutter\n\n" +
+                    "Beeps: 1 = recording started, 2 = stopped, triple buzz = fast-forward on, " +
+                    "long buzz = fast-forward off.\n\n" +
+                    "Screen\n" +
+                    "• Pinch to zoom, tap to focus, double-tap to switch camera\n" +
+                    "• ⏩ while recording marks parts to speed up; a sped-up copy is saved " +
+                    "automatically when you stop (original kept)\n" +
+                    "• ⇪ next to the gallery: resize, trim and join videos"
+            )
+            .setPositiveButton("Got it", null)
+            .show()
+    }
+
+    /** Visual layout chooser for Dual / Vlog mode. */
+    private fun showLayoutPicker() {
+        val dp = resources.displayMetrics.density
+        val options = listOf(
+            DualLayout.PIP to "◳\nPicture in\npicture",
+            DualLayout.SIDE_BY_SIDE to "◫\nSide by\nside",
+            DualLayout.STACKED to "⊟\nTop /\nbottom",
+            DualLayout.SPLIT_CARD to "▣\nSplit\ncard",
+            DualLayout.CUTOUT to "👤\nCutout\n(you over the view)",
+            DualLayout.SOLO to "▢\nOne camera\nonly",
+        )
+        val dialog = MaterialAlertDialogBuilder(this).setTitle("Choose a layout").create()
+        val grid = android.widget.GridLayout(this).apply {
+            columnCount = 3
+            setPadding((12 * dp).toInt(), (4 * dp).toInt(), (12 * dp).toInt(), (12 * dp).toInt())
+        }
+        for ((layout, label) in options) {
+            val locked = isRecording && (layout == DualLayout.CUTOUT || layout == DualLayout.SOLO ||
+                dualLayout == DualLayout.CUTOUT || dualLayout == DualLayout.SOLO) && layout != dualLayout
+            val tile = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setTextColor(if (layout == dualLayout) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
+                setBackgroundResource(if (layout == dualLayout) R.drawable.pill_bg_active else R.drawable.pill_bg)
+                alpha = if (locked) 0.35f else 1f
+                setPadding((6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt())
+                setOnClickListener {
+                    if (locked) {
+                        Toast.makeText(this@MainActivity, "Stop recording to switch to/from this layout", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    dialog.dismiss()
+                    setDualLayout(layout)
+                }
+            }
+            grid.addView(tile, android.widget.GridLayout.LayoutParams().apply {
+                width = 0
+                height = android.widget.GridLayout.LayoutParams.WRAP_CONTENT
+                columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+                setMargins((4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt(), (4 * dp).toInt())
+            })
+        }
+        dialog.setView(grid)
+        dialog.show()
+    }
+
+    private fun setDualLayout(next: DualLayout) {
+        val old = dualLayout
+        if (old == next) return
+        dualLayout = next
+        applyDualSettings()
+        val needsRebind = { l: DualLayout -> l == DualLayout.CUTOUT || l == DualLayout.SOLO }
+        if (needsRebind(old) || needsRebind(next)) bindCamera() else refreshUi()
     }
 
     // ---------------------------------------------------------------- cutout segmentation

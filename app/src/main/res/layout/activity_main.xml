@@ -65,32 +65,58 @@
         android:layout_height="match_parent"
         android:orientation="vertical">
 
-        <!-- Top settings bar -->
-        <HorizontalScrollView
+        <!-- Top bar: only the most-used quick toggles + Settings -->
+        <LinearLayout
+            android:id="@+id/topBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:scrollbars="none">
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="10dp">
 
-            <LinearLayout
-                android:id="@+id/topBar"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:padding="10dp">
+            <TextView android:id="@+id/btnFlash" style="@style/Pill" />
+            <TextView android:id="@+id/btnTimer" style="@style/Pill" />
+            <TextView android:id="@+id/btnStab" style="@style/Pill" />
+            <TextView android:id="@+id/btnMic" style="@style/Pill" />
 
-                <TextView android:id="@+id/btnFlash" style="@style/Pill" />
-                <TextView android:id="@+id/btnTimer" style="@style/Pill" />
-                <TextView android:id="@+id/btnGrid" style="@style/Pill" />
-                <TextView android:id="@+id/btnStab" style="@style/Pill" />
-                <TextView android:id="@+id/btnQuality" style="@style/Pill" />
-                <TextView android:id="@+id/btnEffect" style="@style/Pill" />
-                <TextView android:id="@+id/btnMic" style="@style/Pill" />
-                <TextView android:id="@+id/btnExposure" style="@style/Pill" android:text="± Exposure" />
-                <TextView android:id="@+id/btnMirror" style="@style/Pill" />
-                <TextView android:id="@+id/btnRide" style="@style/Pill" />
-                <TextView android:id="@+id/btnWind" style="@style/Pill" />
-            </LinearLayout>
-        </HorizontalScrollView>
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/btnSettings"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="@drawable/circle_button"
+                android:contentDescription="Settings"
+                android:gravity="center"
+                android:text="⚙"
+                android:textColor="#FFFFFF"
+                android:textSize="22sp" />
+        </LinearLayout>
+
+        <!-- Settings live here (hidden); the Settings sheet shows them as labelled rows -->
+        <LinearLayout
+            android:id="@+id/settingsModel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <TextView android:id="@+id/btnGrid" style="@style/Pill" />
+            <TextView android:id="@+id/btnQuality" style="@style/Pill" />
+            <TextView android:id="@+id/btnEffect" style="@style/Pill" />
+            <TextView android:id="@+id/btnExposure" style="@style/Pill" android:text="± Exposure" />
+            <TextView android:id="@+id/btnMirror" style="@style/Pill" />
+            <TextView android:id="@+id/btnRide" style="@style/Pill" />
+            <TextView android:id="@+id/btnWind" style="@style/Pill" />
+            <TextView android:id="@+id/btnOverlay" style="@style/Pill" />
+            <TextView android:id="@+id/btnOverlayPos" style="@style/Pill" />
+            <TextView android:id="@+id/btnMicSource" style="@style/Pill" />
+            <TextView android:id="@+id/btnDualQuality" style="@style/Pill" />
+            <TextView android:id="@+id/btnFastSpeed" style="@style/Pill" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/recordTime"
@@ -199,14 +225,10 @@
                 <TextView android:id="@+id/btnLayout" style="@style/Pill" />
                 <TextView android:id="@+id/btnDualFrame" style="@style/Pill" />
                 <TextView android:id="@+id/btnDualFit" style="@style/Pill" />
-                <TextView android:id="@+id/btnOverlay" style="@style/Pill" />
-                <TextView android:id="@+id/btnOverlayPos" style="@style/Pill" />
-                <TextView android:id="@+id/btnMicSource" style="@style/Pill" />
                 <TextView android:id="@+id/btnCorner" style="@style/Pill" android:text="Move inset" />
                 <TextView android:id="@+id/btnPipSize" style="@style/Pill" />
                 <TextView android:id="@+id/btnSwap" style="@style/Pill" android:text="⇄ Swap" />
                 <TextView android:id="@+id/btnZoomTarget" style="@style/Pill" />
-                <TextView android:id="@+id/btnDualQuality" style="@style/Pill" />
             </LinearLayout>
         </HorizontalScrollView>
 
@@ -220,12 +242,14 @@
             android:orientation="horizontal" />
 
         <LinearLayout
+            android:id="@+id/zoomRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="16dp"
-            android:paddingEnd="16dp">
+            android:paddingEnd="16dp"
+            android:visibility="gone">
 
             <TextView
                 android:id="@+id/zoomLabel"
@@ -294,6 +318,33 @@
                     android:text="⇪"
                     android:textColor="#FFFFFF"
                     android:textSize="20sp" />
+
+                <TextView
+                    android:id="@+id/btnPause"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_gravity="start|center_vertical"
+                    android:background="@drawable/circle_button"
+                    android:contentDescription="Pause recording"
+                    android:gravity="center"
+                    android:text="❚❚"
+                    android:textColor="#FFFFFF"
+                    android:textSize="18sp"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/btnFast"
+                    android:layout_width="54dp"
+                    android:layout_height="54dp"
+                    android:layout_gravity="start|center_vertical"
+                    android:layout_marginStart="64dp"
+                    android:background="@drawable/circle_button"
+                    android:contentDescription="Fast-forward this part"
+                    android:gravity="center"
+                    android:text="⏩"
+                    android:textColor="#FFFFFF"
+                    android:textSize="20sp"
+                    android:visibility="gone" />
             </FrameLayout>
 
             <ImageButton
@@ -312,17 +363,6 @@
                 android:gravity="end|center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
-                    android:id="@+id/btnPause"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:layout_marginEnd="10dp"
-                    android:background="@drawable/circle_button"
-                    android:gravity="center"
-                    android:text="❚❚"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:visibility="gone" />
 
                 <TextView
                     android:id="@+id/btnSnapshot"

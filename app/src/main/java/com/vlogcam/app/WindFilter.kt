@@ -33,7 +33,7 @@ import kotlin.math.sin
 @OptIn(UnstableApi::class)
 class WindFilter(private val context: Context, private val onDone: (Uri, Boolean) -> Unit) {
 
-    private data class Job(val uri: Uri, val level: Int)
+    private data class Job(val uri: Uri, val level: Int, val then: (() -> Unit)?)
 
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -43,9 +43,9 @@ class WindFilter(private val context: Context, private val onDone: (Uri, Boolean
     val busy: Boolean get() = running || queue.isNotEmpty()
 
     /** [level]: 1 = light (removes rumble below ~100 Hz), 2 = strong (below ~200 Hz, steeper). */
-    fun enqueue(uri: Uri, level: Int) {
-        if (level <= 0) return
-        queue.add(Job(uri, level))
+    fun enqueue(uri: Uri, level: Int, then: (() -> Unit)? = null) {
+        if (level <= 0) { then?.invoke(); return }
+        queue.add(Job(uri, level, then))
         if (!running) next()
     }
 
@@ -70,6 +70,7 @@ class WindFilter(private val context: Context, private val onDone: (Uri, Boolean
                         out.delete()
                         main.post {
                             onDone(job.uri, ok)
+                            job.then?.invoke()
                             next()
                         }
                     }
@@ -83,6 +84,7 @@ class WindFilter(private val context: Context, private val onDone: (Uri, Boolean
                     Log.e(TAG, "Wind filter failed", exportException)
                     out.delete()
                     onDone(job.uri, false)
+                    job.then?.invoke()
                     next()
                 }
             })
@@ -92,6 +94,7 @@ class WindFilter(private val context: Context, private val onDone: (Uri, Boolean
         } catch (e: Exception) {
             Log.e(TAG, "Wind filter start failed", e)
             onDone(job.uri, false)
+            job.then?.invoke()
             next()
         }
     }

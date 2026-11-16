@@ -57,6 +57,19 @@ the front and rear cameras record at the same time into a single video.
 - **📍 Speed overlay** (Dual/Vlog mode): live GPS speed (km/h), trip distance for the current recording,
   time and place name, burned into the video, preview and snapshots. Move it to any corner.
 
+**Fast-forward (time-lapse) while riding**
+- While recording, tap **⏩** (or press **Next** on the helmet remote — a double-press on most intercoms)
+  at the start of a boring stretch, and again at the end. You hear a triple buzz/tone for on, a long one for off.
+- When you stop, the app saves a second copy where those stretches play fast (4x/8x/16x/32x, set in
+  ⚙ Settings → Ride) with quieter sound. The original recording is kept.
+
+**Controls**
+- Top bar: flash/torch, timer, stabilization, mic, and **⚙ Settings** (Camera, Dual/Vlog, Sound, Ride
+  sections, plus a remote-button cheat sheet).
+- Dual/Vlog: **▦ Layout** opens a visual layout picker; the row shows only what applies to that layout.
+- While recording, the left of the shutter shows **Pause** and **⏩ Fast-forward**.
+- The zoom slider appears while zooming and hides itself after a few seconds.
+
 **Edit & export (⇪ button)**
 - **✂️ Trim:** preview the video, drag the two handles to choose the part to keep, preview the selection,
   and save a trimmed copy (fast: only the first moments are re-encoded; the original is kept).

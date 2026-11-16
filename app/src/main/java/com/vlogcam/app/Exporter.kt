@@ -148,6 +148,87 @@ class Exporter(private val context: Context) {
         )
     }
 
+    /**
+     * Saves a copy of [source] where the given time ranges (ms) play [speed] times faster
+     * with quieter sound; everything else stays at normal speed.
+     */
+    fun speedUp(
+        source: Uri, rangesMs: List<Pair<Long, Long>>, speed: Float,
+        onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit,
+    ) {
+        cancelled = false
+        val rangesUs = rangesMs.map { it.first * 1000 to it.second * 1000 }.sortedBy { it.first }
+        val boundaries = rangesUs.flatMap { listOf(it.first, it.second) }.sorted()
+        val provider = object : androidx.media3.common.audio.SpeedProvider {
+            override fun getSpeed(timeUs: Long): Float =
+                if (rangesUs.any { timeUs >= it.first && timeUs < it.second }) speed else 1f
+
+            override fun getNextSpeedChangeTimeUs(timeUs: Long): Long =
+                boundaries.firstOrNull { it > timeUs } ?: androidx.media3.common.C.TIME_UNSET
+        }
+        val linked = Effects.createExperimentalSpeedChangingEffect(provider)
+        val item = EditedMediaItem.Builder(MediaItem.fromUri(source))
+            .setEffects(
+                Effects(
+                    listOf(QuietRangesProcessor(rangesUs, 0.15f), linked.first),
+                    listOf(linked.second)
+                )
+            )
+            .build()
+        // The speed effect is driven by the audio track, so make sure there always is one.
+        val sequence = EditedMediaItemSequence.Builder(listOf(item))
+            .experimentalSetForceAudioTrack(true)
+            .build()
+        val composition = Composition.Builder(sequence).build()
+        runVideoJob("Fast", { it }, { t, out -> t.start(composition, out) }, null, onProgress, onDone)
+    }
+
+    /** Lowers the volume inside the given ranges (input time, µs), with short fades. */
+    private class QuietRangesProcessor(
+        private val rangesUs: List<Pair<Long, Long>>,
+        private val quietGain: Float,
+    ) : androidx.media3.common.audio.BaseAudioProcessor() {
+        private var sampleRate = 48_000
+        private var channels = 1
+        private var frame = 0L
+        private var gain = 1f
+
+        override fun onConfigure(
+            inputAudioFormat: androidx.media3.common.audio.AudioProcessor.AudioFormat,
+        ): androidx.media3.common.audio.AudioProcessor.AudioFormat {
+            if (inputAudioFormat.encoding != androidx.media3.common.C.ENCODING_PCM_16BIT) {
+                throw androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
+            }
+            sampleRate = inputAudioFormat.sampleRate
+            channels = inputAudioFormat.channelCount
+            return inputAudioFormat
+        }
+
+        override fun queueInput(inputBuffer: java.nio.ByteBuffer) {
+            val input = inputBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val out = replaceOutputBuffer(input.remaining()).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val step = 1f / (sampleRate * 0.15f)  // ~150 ms fade
+            var ch = 0
+            while (input.remaining() >= 2) {
+                if (ch == 0) {
+                    val tUs = frame * 1_000_000L / sampleRate
+                    val target = if (rangesUs.any { tUs >= it.first && tUs < it.second }) quietGain else 1f
+                    gain = if (gain < target) minOf(target, gain + step) else maxOf(target, gain - step)
+                    frame++
+                }
+                val v = input.short * gain
+                out.putShort(v.coerceIn(-32768f, 32767f).toInt().toShort())
+                ch = (ch + 1) % channels
+            }
+            out.flip()
+        }
+
+        override fun onFlush() {
+            frame = 0L
+            gain = 1f
+        }
+    }
+
     private fun runVideoJob(
         tag: String,
         configure: (Transformer.Builder) -> Transformer.Builder,
