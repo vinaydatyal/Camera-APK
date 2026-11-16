@@ -1880,7 +1880,6 @@ class MainActivity : AppCompatActivity() {
         dualNextUri = null
         dualNextPfd = null
         val audio = dualHasAudio
-        val ranges = takeFastRanges()
         ioExecutor.execute {
             finalizeEntry(oldUri, oldPfd, true)
             runOnUiThread {
@@ -1901,6 +1900,7 @@ class MainActivity : AppCompatActivity() {
         dualNextUri = null
         dualNextPfd = null
         val audio = dualHasAudio
+        val ranges = takeFastRanges()
         dualStopping = true
         mediaRecorder = null
         exitRideMode()
