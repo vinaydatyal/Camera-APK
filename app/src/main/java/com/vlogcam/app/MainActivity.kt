@@ -284,7 +284,7 @@ class MainActivity : AppCompatActivity() {
         orientationListener.enable()
         handler.removeCallbacks(healthMonitor)
         handler.post(healthMonitor)
-        updateHud()
+        handler.post { updateHud() }
         if (installAfterPermission && Updater.canInstall(this)) {
             installAfterPermission = false
             downloadedApk?.let { launchInstaller(it) }
@@ -297,14 +297,19 @@ class MainActivity : AppCompatActivity() {
         orientationListener.disable()
         handler.removeCallbacks(healthMonitor)
         exitRideMode()
-        handler.post { updateHud() }
         savePrefs()
         cancelCountdown()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        handler.post { updateHud() }
     }
 
     override fun onStop() {
         super.onStop()
         if (mediaRecorder != null) stopDualRecording()
+        handler.post { updateHud() }
     }
 
     override fun onDestroy() {
@@ -433,7 +438,9 @@ class MainActivity : AppCompatActivity() {
     /** Starts/stops GPS + overlay drawing as needed (dual mode, overlay on, app visible). */
     private fun updateHud() {
         val want = overlayOn && mode == Mode.DUAL && hasLocationPermission() &&
-            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+            // STARTED, not RESUMED: keep tracking through brief interruptions such as the
+            // notification shade, a permission prompt or a heads-up notification.
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
         if (want && hud == null) {
             hud = RideHud(this) { bmp -> dualRenderer?.setOverlay(bmp) }.also {
                 it.setCounting(mediaRecorder != null)
@@ -445,7 +452,8 @@ class MainActivity : AppCompatActivity() {
             hud?.stop()
             hud = null
         }
-        if (!overlayOn || mode != Mode.DUAL) dualRenderer?.setOverlay(null)
+        // Never leave a stale (frozen) panel on screen when tracking isn't running.
+        if (hud == null) dualRenderer?.setOverlay(null)
         dualRenderer?.overlayCorner = overlayCorner
     }
 
