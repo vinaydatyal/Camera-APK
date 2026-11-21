@@ -37,10 +37,8 @@ the front and rear cameras record at the same time into a single video.
 - Works in portrait and landscape and follows the phone's auto-rotate setting
 
 **On the bike**
-- **Helmet / Bluetooth remote:** the play/pause button on a helmet intercom, earphones or media remote
-  starts and stops recording (or takes a photo). Next = snapshot, Previous = swap/switch camera.
-  Volume keys and cheap Bluetooth selfie shutters work too. You hear a beep and feel a vibration on
-  start (1 beep), stop (2 beeps) and snapshot.
+- **Buttons:** the phone's volume buttons (or a cheap Bluetooth selfie shutter) work as the shutter.
+  Headset/intercom buttons are deliberately not used, so they keep controlling your music.
 - **Ride mode** (🏍 button, on by default): 8 seconds after recording starts the screen goes black
   to save battery and heat, while recording continues. Tap once to wake.
 - **Heat, battery and storage protection:** a red banner warns when the phone is getting hot, battery is
@@ -58,14 +56,14 @@ the front and rear cameras record at the same time into a single video.
   time and place name, burned into the video, preview and snapshots. Move it to any corner.
 
 **Fast-forward (time-lapse) while riding**
-- While recording, tap **⏩** (or press **Next** on the helmet remote — a double-press on most intercoms)
-  at the start of a boring stretch, and again at the end. You hear a triple buzz/tone for on, a long one for off.
+- While recording, tap **⏩** at the start of a boring stretch, and again at the end
+  (the phone vibrates: triple buzz = on, long buzz = off).
 - When you stop, the app saves a second copy where those stretches play fast (4x/8x/16x/32x, set in
   ⚙ Settings → Ride) with quieter sound. The original recording is kept.
 
 **Controls**
 - Top bar: flash/torch, timer, stabilization, mic, and **⚙ Settings** (Camera, Dual/Vlog, Sound, Ride
-  sections, plus a remote-button cheat sheet).
+  sections, plus a buttons & gestures cheat sheet).
 - Dual/Vlog: **▦ Layout** opens a visual layout picker; the row shows only what applies to that layout.
 - While recording, the left of the shutter shows **Pause** and **⏩ Fast-forward**.
 - The zoom slider appears while zooming and hides itself after a few seconds.

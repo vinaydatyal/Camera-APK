@@ -325,15 +325,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // Only the phone's own volume/camera keys (and Bluetooth selfie shutters, which send
+        // volume-up). Headset/intercom media buttons are left alone so they keep controlling music.
         val action = when (keyCode) {
-            // Volume keys, camera key, Bluetooth shutter remotes
-            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA,
-            // Helmet intercoms, earphones and media remotes (play/pause button)
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK,
-            KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
-            KeyEvent.KEYCODE_MEDIA_STOP -> RemoteAction.SHUTTER
-            KeyEvent.KEYCODE_MEDIA_NEXT -> RemoteAction.SNAPSHOT
-            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> RemoteAction.SWITCH
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA ->
+                RemoteAction.SHUTTER
             else -> null
         } ?: return super.onKeyDown(keyCode, event)
         if (event.repeatCount == 0) onRemote(action, keyCode)
@@ -341,10 +337,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = when (keyCode) {
-        KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_MEDIA_PLAY,
-        KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_NEXT,
-        KeyEvent.KEYCODE_MEDIA_PREVIOUS -> true
+        KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA -> true
         else -> super.onKeyUp(keyCode, event)
     }
 
@@ -366,7 +359,8 @@ class MainActivity : AppCompatActivity() {
             "fast_off" -> android.media.ToneGenerator.TONE_PROP_NACK
             else -> android.media.ToneGenerator.TONE_SUP_ERROR
         }
-        runCatching { toneGen?.startTone(tone, if (kind == "warn") 600 else 200) }
+        // Only safety warnings make a sound (it would otherwise play over your music).
+        if (kind == "warn") runCatching { toneGen?.startTone(tone, 600) }
         val vib = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
         } else {
@@ -2213,7 +2207,7 @@ class MainActivity : AppCompatActivity() {
             list.addView(line)
         }
         list.addView(TextView(this).apply {
-            text = "❓  Remote buttons & gestures"
+            text = "❓  Buttons & gestures"
             textSize = 16f
             setTextColor(0xFFFFFFFF.toInt())
             setPadding(0, (22 * dp).toInt(), 0, (8 * dp).toInt())
@@ -2225,16 +2219,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun showHelp() {
         MaterialAlertDialogBuilder(this)
-            .setTitle("Remote buttons & gestures")
+            .setTitle("Buttons & gestures")
             .setMessage(
-                "Helmet intercom / Bluetooth remote\n" +
-                    "• Play/Pause: start or stop recording (photo in Photo mode)\n" +
-                    "• Next (double-press on most intercoms): while recording, fast-forward on/off; " +
-                    "otherwise a snapshot\n" +
-                    "• Previous (triple-press): swap cameras\n" +
-                    "• Volume buttons: shutter\n\n" +
-                    "Beeps: 1 = recording started, 2 = stopped, triple buzz = fast-forward on, " +
-                    "long buzz = fast-forward off.\n\n" +
+                "Buttons\n" +
+                    "• Phone volume buttons (or a Bluetooth selfie shutter): shutter / start-stop\n" +
+                    "• Headset and intercom buttons are not used, so they keep controlling your music\n\n" +
+                    "Vibration: triple buzz = fast-forward on, long buzz = fast-forward off. " +
+                    "Warning tones only for heat, battery or storage problems.\n\n" +
                     "Screen\n" +
                     "• Pinch to zoom, tap to focus, double-tap to switch camera\n" +
                     "• ⏩ while recording marks parts to speed up; a sped-up copy is saved " +
