@@ -155,6 +155,7 @@ class Exporter(private val context: Context) {
     fun speedUp(
         source: Uri, rangesMs: List<Pair<Long, Long>>, speed: Float,
         onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit,
+        motionBlur: Boolean = true,
     ) {
         cancelled = false
         val rangesUs = rangesMs.map { it.first * 1000 to it.second * 1000 }.sortedBy { it.first }
@@ -171,7 +172,14 @@ class Exporter(private val context: Context) {
             .setEffects(
                 Effects(
                     listOf(QuietRangesProcessor(rangesUs, 0.15f), linked.first),
-                    listOf(linked.second)
+                    buildList {
+                        // Blend frames in the fast parts first (in original time), so the frames
+                        // that speeding up skips become smooth motion streaks.
+                        if (motionBlur) add(MotionTrailEffect(rangesUs, speed.toInt()))
+                        add(linked.second)
+                        // Keep a normal 30 fps output instead of hundreds of compressed frames.
+                        add(androidx.media3.effect.FrameDropEffect.createDefaultFrameDropEffect(30f))
+                    }
                 )
             )
             .build()

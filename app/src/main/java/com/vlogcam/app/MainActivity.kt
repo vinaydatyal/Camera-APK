@@ -439,24 +439,39 @@ class MainActivity : AppCompatActivity() {
 
     /** Starts/stops GPS + overlay drawing as needed (dual mode, overlay on, app visible). */
     private fun updateHud() {
-        val want = overlayOn && mode == Mode.DUAL && hasLocationPermission() &&
+        val want = (overlayOn || speedBlurLevel > 0) && mode == Mode.DUAL && hasLocationPermission() &&
             // STARTED, not RESUMED: keep tracking through brief interruptions such as the
             // notification shade, a permission prompt or a heads-up notification.
             lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
         if (want && hud == null) {
-            hud = RideHud(this) { bmp -> dualRenderer?.setOverlay(bmp) }.also {
+            hud = RideHud(this) { bmp ->
+                if (overlayOn) dualRenderer?.setOverlay(bmp)
+                updateSpeedBlur()
+            }.also {
                 it.setCounting(mediaRecorder != null)
                 it.start()
             }
         } else if (!want && hud != null) {
             // Keep the overlay running during a recording even if briefly paused.
-            if (mediaRecorder != null && overlayOn) return
+            if (mediaRecorder != null && (overlayOn || speedBlurLevel > 0)) return
             hud?.stop()
             hud = null
         }
         // Never leave a stale (frozen) panel on screen when tracking isn't running.
-        if (hud == null) dualRenderer?.setOverlay(null)
+        if (hud == null || !overlayOn) dualRenderer?.setOverlay(null)
         dualRenderer?.overlayCorner = overlayCorner
+        updateSpeedBlur()
+    }
+
+    private var speedBlurLevel = 0  // 0 = off, 1 = subtle, 2 = strong
+    private var ffMotionBlur = true
+
+    /** Speed blur strength follows GPS speed: none below 15 km/h, full at 90 km/h. */
+    private fun updateSpeedBlur() {
+        val kmh = hud?.currentKmh() ?: 0f
+        val ramp = ((kmh - 15f) / 75f).coerceIn(0f, 1f)
+        val max = when (speedBlurLevel) { 1 -> 0.045f; 2 -> 0.085f; else -> 0f }
+        dualRenderer?.speedBlur = if (mode == Mode.DUAL) max * ramp else 0f
     }
 
     // ---------------------------------------------------------------- fast-forward sections
@@ -632,7 +647,7 @@ class MainActivity : AppCompatActivity() {
         if (speedBusy) return
         val (uri, ranges) = speedQueue.removeFirstOrNull() ?: return
         speedBusy = true
-        bgExporter.speedUp(uri, ranges, fastSpeed.toFloat(), {}) { out, error ->
+        bgExporter.speedUp(uri, ranges, fastSpeed.toFloat(), {}, motionBlur = ffMotionBlur) { out, error ->
             speedBusy = false
             if (out != null) {
                 Toast.makeText(this, "⏩ Fast-forward version saved (Movies/VlogCam/Exports)", Toast.LENGTH_LONG).show()
@@ -805,6 +820,8 @@ class MainActivity : AppCompatActivity() {
         fastSpeed = prefs.getInt("fastSpeed", 8)
         sharpOn = prefs.getBoolean("sharp", false)
         horizonMode = prefs.getInt("horizon", 0).coerceIn(0, 2)
+        speedBlurLevel = prefs.getInt("speedBlur", 0).coerceIn(0, 2)
+        ffMotionBlur = prefs.getBoolean("ffBlur", true)
         micChoice = prefs.getString("micChoice", "phone")!!
         windLevel = prefs.getInt("wind", 0)
         overlayOn = prefs.getBoolean("overlay", false)
@@ -834,6 +851,8 @@ class MainActivity : AppCompatActivity() {
             .putInt("fastSpeed", fastSpeed)
             .putBoolean("sharp", sharpOn)
             .putInt("horizon", horizonMode)
+            .putInt("speedBlur", speedBlurLevel)
+            .putBoolean("ffBlur", ffMotionBlur)
             .putString("micChoice", micChoice)
             .putInt("wind", windLevel)
             .putBoolean("overlay", overlayOn)
@@ -1480,6 +1499,20 @@ class MainActivity : AppCompatActivity() {
             refreshUi()
         }
         b.btnSettings.setOnClickListener { showSettingsSheet() }
+        b.btnSpeedBlur.setOnClickListener {
+            speedBlurLevel = (speedBlurLevel + 1) % 3
+            if (speedBlurLevel > 0 && !hasLocationPermission()) {
+                locationLauncher.launch(
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                )
+            }
+            updateHud()
+            refreshUi()
+        }
+        b.btnFfBlur.setOnClickListener {
+            ffMotionBlur = !ffMotionBlur
+            refreshUi()
+        }
         b.btnHorizon.setOnClickListener {
             horizonMode = (horizonMode + 1) % 3
             updateHorizonSensor()
@@ -1728,6 +1761,8 @@ class MainActivity : AppCompatActivity() {
         b.btnFastSpeed.text = "⏩ Fast-forward speed ${fastSpeed}x"
         b.btnSharp.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
         b.btnHorizon.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
+        b.btnSpeedBlur.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
+        b.btnFfBlur.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
         b.btnHorizon.text = "Horizon " + arrayOf("Off", "Level mount", "Lock horizon")[horizonMode]
         b.btnSharp.text = if (sharpOn) "Sharp motion On" else "Sharp motion Off"
         b.btnSettings.visibility = if (isRecording) View.GONE else View.VISIBLE
@@ -2276,6 +2311,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }),
             SettingRow("Ride", "Fast-forward speed", b.btnFastSpeed, { "${fastSpeed}x" }),
+            SettingRow("Ride", "Fast-forward motion blur", b.btnFfBlur, { if (ffMotionBlur) "On" else "Off" }),
+            SettingRow("Ride", "Speed blur effect", b.btnSpeedBlur, {
+                arrayOf("Off", "Subtle", "Strong")[speedBlurLevel]
+            }),
             SettingRow("Ride", "Horizon (road camera)", b.btnHorizon, {
                 arrayOf("Off", "Level mount", "Lock horizon")[horizonMode]
             }),

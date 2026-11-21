@@ -74,6 +74,13 @@ the front and rear cameras record at the same time into a single video.
 - The road image is rotated back using the phone's motion sensors and zoomed just enough to hide the
   corners (about 15% at 5°). Full corner leans (20–40°) aren't corrected.
 
+**Motion blur (⚙ Settings → Ride)**
+- **Fast-forward motion blur** (on by default): in the sped-up copy, frames inside fast parts are blended
+  together so skipped moments become smooth motion streaks (a real hyperlapse look) instead of jumps.
+  Output stays at 30 fps.
+- **Speed blur effect** (Off / Subtle / Strong, Dual/Vlog mode): a live radial "speed lines" blur at the
+  edges of the road camera that grows with GPS speed (none below 15 km/h, full at 90 km/h). The centre stays sharp.
+
 **Controls**
 - Top bar: flash/torch, timer, stabilization, mic, and **⚙ Settings** (Camera, Dual/Vlog, Sound, Ride
   sections, plus a buttons & gestures cheat sheet).

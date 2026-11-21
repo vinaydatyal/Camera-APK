@@ -124,6 +124,15 @@ class DualRenderer {
     @Volatile var levelAngleDeg = 0f
     /** Angle used to size the anti-corner zoom (changes more slowly than the rotation itself). */
     @Volatile var levelZoomAngleDeg = 0f
+
+    /** Speed blur on the road camera: 0 = none, ~0.08 = strong radial streaks at the edges. */
+    @Volatile var speedBlur = 0f
+    private var radProg = 0
+    private var radPos = 0
+    private var radTex = 0
+    private var radSampler = 0
+    private var radCenter = 0
+    private var radStrength = 0
     @Volatile private var luma0 = -1f
     @Volatile private var luma1 = -1f
 
@@ -330,6 +339,13 @@ class DualRenderer {
         cutSampler = GLES20.glGetUniformLocation(cutProg, "sTex")
         cutMaskSampler = GLES20.glGetUniformLocation(cutProg, "sMask")
 
+        radProg = buildProgram(VERTEX_SHADER, RADIAL_FRAGMENT_SHADER)
+        radPos = GLES20.glGetAttribLocation(radProg, "aPos")
+        radTex = GLES20.glGetAttribLocation(radProg, "aTex")
+        radSampler = GLES20.glGetUniformLocation(radProg, "sTex")
+        radCenter = GLES20.glGetUniformLocation(radProg, "uCenter")
+        radStrength = GLES20.glGetUniformLocation(radProg, "uStrength")
+
         blurProg = buildProgram(VERTEX_SHADER, BLUR_FRAGMENT_SHADER)
         blurPos = GLES20.glGetAttribLocation(blurProg, "aPos")
         blurTex = GLES20.glGetAttribLocation(blurProg, "aTex")
@@ -477,7 +493,10 @@ class DualRenderer {
     /** Renders the stream's centre into a tiny buffer and averages its brightness. */
     private fun measureLuma(stream: Stream, slot: Int) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, lumaFbo[0])
-        drawStream(stream, slot, 0, 0, LUMA_SIZE, LUMA_SIZE, displayRotationDeg, aspectOverride = 1f)
+        drawStream(
+            stream, slot, 0, 0, LUMA_SIZE, LUMA_SIZE, displayRotationDeg,
+            aspectOverride = 1f, effects = false
+        )
         lumaBuf.rewind()
         GLES20.glReadPixels(0, 0, LUMA_SIZE, LUMA_SIZE, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, lumaBuf)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
@@ -612,7 +631,10 @@ class DualRenderer {
      */
     private fun drawBlurredBackground(stream: Stream, slot: Int, w: Int, h: Int, rotationDeg: Int) {
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[0])
-        drawStream(stream, slot, 0, 0, BLUR_W, BLUR_H, rotationDeg, aspectOverride = w.toFloat() / h)
+        drawStream(
+            stream, slot, 0, 0, BLUR_W, BLUR_H, rotationDeg,
+            aspectOverride = w.toFloat() / h, effects = false
+        )
         val sx = 1f / BLUR_W
         val sy = 1f / BLUR_H
         blurPass(fboTex[0], fbo[1], sx, 0f)
@@ -693,6 +715,7 @@ class DualRenderer {
         stream: Stream, slot: Int, x: Int, y: Int, w: Int, h: Int, rotationDeg: Int,
         aspectOverride: Float = 0f,
         cutout: Boolean = false,
+        effects: Boolean = true,
     ) {
         if (!stream.hasFrame || w <= 0 || h <= 0) return
         val m = stream.matrix
@@ -803,6 +826,21 @@ class DualRenderer {
             GLES20.glDisableVertexAttribArray(cutPos)
             GLES20.glDisableVertexAttribArray(cutTex)
             GLES20.glDisableVertexAttribArray(cutMaskCoord)
+        } else if (effects && !front && speedBlur > 0.003f) {
+            // Zoom-style blur toward the centre: the middle stays sharp, edges streak.
+            val cx = (texCoords[0] + texCoords[2] + texCoords[4] + texCoords[6]) / 4f
+            val cy = (texCoords[1] + texCoords[3] + texCoords[5] + texCoords[7]) / 4f
+            GLES20.glUseProgram(radProg)
+            GLES20.glUniform1i(radSampler, 0)
+            GLES20.glUniform2f(radCenter, cx, cy)
+            GLES20.glUniform1f(radStrength, speedBlur)
+            GLES20.glVertexAttribPointer(radPos, 2, GLES20.GL_FLOAT, false, 0, posBuf)
+            GLES20.glEnableVertexAttribArray(radPos)
+            GLES20.glVertexAttribPointer(radTex, 2, GLES20.GL_FLOAT, false, 0, texBuf)
+            GLES20.glEnableVertexAttribArray(radTex)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GLES20.glDisableVertexAttribArray(radPos)
+            GLES20.glDisableVertexAttribArray(radTex)
         } else {
             GLES20.glUseProgram(oesProg)
             GLES20.glUniform1i(oesSampler, 0)
@@ -919,6 +957,25 @@ class DualRenderer {
             uniform sampler2D sTex;
             void main() {
                 gl_FragColor = texture2D(sTex, vTex);
+            }
+        """
+
+        // Radial (zoom) blur: 8 samples from the pixel toward the centre.
+        private const val RADIAL_FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            varying vec2 vTex;
+            uniform samplerExternalOES sTex;
+            uniform vec2 uCenter;
+            uniform float uStrength;
+            void main() {
+                vec2 d = vTex - uCenter;
+                vec3 c = vec3(0.0);
+                for (int i = 0; i < 8; i++) {
+                    float t = float(i) / 7.0;
+                    c += texture2D(sTex, uCenter + d * (1.0 - uStrength * t)).rgb;
+                }
+                gl_FragColor = vec4(c / 8.0, 1.0);
             }
         """
 

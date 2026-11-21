@@ -100,6 +100,10 @@ class RideHud(private val context: Context, private val onFrame: (Bitmap) -> Uni
         main.removeCallbacks(ticker)
     }
 
+    /** Smoothed speed in km/h, or 0 when there's no recent GPS fix. */
+    fun currentKmh(): Float =
+        if (System.currentTimeMillis() - lastFixMs < 6_000) shownKmh else 0f
+
     /** Starts (true) or stops counting trip distance. Starting resets it to zero. */
     fun setCounting(on: Boolean) {
         if (on) distanceM = 0.0

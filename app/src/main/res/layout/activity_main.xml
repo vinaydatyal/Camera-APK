@@ -118,6 +118,8 @@
             <TextView android:id="@+id/btnFastSpeed" style="@style/Pill" />
             <TextView android:id="@+id/btnSharp" style="@style/Pill" />
             <TextView android:id="@+id/btnHorizon" style="@style/Pill" />
+            <TextView android:id="@+id/btnSpeedBlur" style="@style/Pill" />
+            <TextView android:id="@+id/btnFfBlur" style="@style/Pill" />
         </LinearLayout>
 
         <TextView
