@@ -461,6 +461,28 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------------------------------------------------------- fast-forward sections
 
+    private var sharpOn = false
+    private var soloSlot = 0
+    private val sharp by lazy { SharpMotion { dualRenderer } }
+
+    /** Cameras that Sharp motion should control right now, with their renderer slot. */
+    private fun sharpTargets(): List<Pair<Camera, Int>> = when (mode) {
+        Mode.PHOTO -> emptyList()
+        Mode.VIDEO -> listOfNotNull(camera?.let { it to -1 })
+        Mode.DUAL -> if (dualLayout == DualLayout.SOLO) {
+            listOfNotNull(dualCameras.firstOrNull()?.let { it to soloSlot })
+        } else dualCameras.mapIndexed { i, c -> c to i }
+    }
+
+    private fun applySharp() {
+        if (sharpOn) {
+            sharp.enabled = true
+            sharp.setCameras(sharpTargets())
+        } else {
+            sharp.setCameras(emptyList())
+        }
+    }
+
     private var fastSpeed = 8
     private var fastActive = false
     private var fastStartMs = 0L
@@ -709,6 +731,7 @@ class MainActivity : AppCompatActivity() {
         dualFit = prefs.getBoolean("dualFit", false)
         rideAuto = prefs.getBoolean("rideAuto", true)
         fastSpeed = prefs.getInt("fastSpeed", 8)
+        sharpOn = prefs.getBoolean("sharp", false)
         micChoice = prefs.getString("micChoice", "phone")!!
         windLevel = prefs.getInt("wind", 0)
         overlayOn = prefs.getBoolean("overlay", false)
@@ -736,6 +759,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("dualFit", dualFit)
             .putBoolean("rideAuto", rideAuto)
             .putInt("fastSpeed", fastSpeed)
+            .putBoolean("sharp", sharpOn)
             .putString("micChoice", micChoice)
             .putInt("wind", windLevel)
             .putBoolean("overlay", overlayOn)
@@ -870,6 +894,7 @@ class MainActivity : AppCompatActivity() {
         if (ok) {
             observeCamera(activeCamera())
             updateTargetRotation()
+            applySharp()
         }
         updateHud()
         refreshUi()
@@ -882,6 +907,7 @@ class MainActivity : AppCompatActivity() {
         imageCapture = null
         videoCapture = null
         stabilizationActive = false
+        sharp.setCameras(emptyList())
         dualPreviews = emptyList()
         cutoutAnalysis = null
         // Drop the cached dual session so the next bind uses the current layout.
@@ -1013,6 +1039,7 @@ class MainActivity : AppCompatActivity() {
                 .setResolutionSelector(resolution)
                 .setTargetRotation(rotation)
                 .apply { if (stabilizationActive) setPreviewStabilizationEnabled(true) }
+                .also { sharp.attach(it, slot) }
                 .build()
                 .also { it.setSurfaceProvider(renderer.surfaceProvider(slot)) }
         }
@@ -1093,8 +1120,10 @@ class MainActivity : AppCompatActivity() {
             )
             .setTargetRotation(rotation)
             .apply { if (stabilizationActive) setPreviewStabilizationEnabled(true) }
+            .also { sharp.attach(it, slot) }
             .build()
         p.setSurfaceProvider(renderer.surfaceProvider(slot))
+        soloSlot = slot
         renderer.displayRotationDeg = rotation * 90
         renderer.clearMask()
         applyDualSettings()
@@ -1376,6 +1405,20 @@ class MainActivity : AppCompatActivity() {
             refreshUi()
         }
         b.btnSettings.setOnClickListener { showSettingsSheet() }
+        b.btnSharp.setOnClickListener {
+            if (sharpOn) {
+                sharpOn = false
+                sharp.disable(sharpTargets())
+            } else {
+                sharpOn = true
+                applySharp()
+                Toast.makeText(
+                    this, "Sharp motion on: fast shutter against vibration blur (night video gets grainier)",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            refreshUi()
+        }
         b.btnFast.setOnClickListener { toggleFastForward() }
         b.btnFastSpeed.setOnClickListener {
             fastSpeed = when (fastSpeed) { 4 -> 8; 8 -> 16; 16 -> 32; else -> 4 }
@@ -1603,6 +1646,8 @@ class MainActivity : AppCompatActivity() {
         b.btnFast.setBackgroundResource(if (fastActive) R.drawable.circle_button_active else R.drawable.circle_button)
         b.btnFast.setTextColor(if (fastActive) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
         b.btnFastSpeed.text = "⏩ Fast-forward speed ${fastSpeed}x"
+        b.btnSharp.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
+        b.btnSharp.text = if (sharpOn) "Sharp motion On" else "Sharp motion Off"
         b.btnSettings.visibility = if (isRecording) View.GONE else View.VISIBLE
         b.btnPause.visibility = if (isRecording) View.VISIBLE else View.GONE
         b.btnPause.text = if (recordingPaused) "▶" else "❚❚"
@@ -2133,6 +2178,7 @@ class MainActivity : AppCompatActivity() {
             SettingRow("Camera", "Video quality", b.btnQuality, { qualityLabel(preferredQuality) }),
             SettingRow("Camera", "Photo style", b.btnEffect, { extensionLabel(extensionMode) }),
             SettingRow("Camera", "Exposure (brightness)", b.btnExposure, { "Adjust" }, closesSheet = true),
+            SettingRow("Camera", "Sharp motion (less vibration blur)", b.btnSharp, { if (sharpOn) "On" else "Off" }),
             SettingRow("Camera", "Mirror front camera", b.btnMirror, { if (mirrorFront) "On" else "Off" }),
             SettingRow("Dual / Vlog", "Recording quality", b.btnDualQuality, { if (dualFullHd) "1080p" else "720p" }),
             SettingRow("Sound", "Microphone", b.btnMicSource, { Mics.find(this, micChoice).label }),

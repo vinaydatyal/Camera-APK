@@ -116,6 +116,7 @@
             <TextView android:id="@+id/btnMicSource" style="@style/Pill" />
             <TextView android:id="@+id/btnDualQuality" style="@style/Pill" />
             <TextView android:id="@+id/btnFastSpeed" style="@style/Pill" />
+            <TextView android:id="@+id/btnSharp" style="@style/Pill" />
         </LinearLayout>
 
         <TextView

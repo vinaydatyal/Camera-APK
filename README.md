@@ -61,6 +61,13 @@ the front and rear cameras record at the same time into a single video.
 - When you stop, the app saves a second copy where those stretches play fast (4x/8x/16x/32x, set in
   ⚙ Settings → Ride) with quieter sound. The original recording is kept.
 
+**Sharp motion (⚙ Settings → Camera)**
+- Fights the smear from handlebar/road vibration: keeps the shutter at 1/250 s and locks 30 fps,
+  raising ISO to keep brightness (night video gets grainier but sharper).
+- Android 16+ phones with shutter-priority exposure use it natively; otherwise Vlog/Dual mode runs its
+  own exposure control, and Video mode gets the 30 fps lock.
+- A vibration-damping phone mount is still the biggest single improvement.
+
 **Controls**
 - Top bar: flash/torch, timer, stabilization, mic, and **⚙ Settings** (Camera, Dual/Vlog, Sound, Ride
   sections, plus a buttons & gestures cheat sheet).

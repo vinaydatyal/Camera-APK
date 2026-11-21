@@ -113,6 +113,18 @@ class DualRenderer {
     private val fboTex = IntArray(2)
     private val fbo = IntArray(2)
 
+    // Tiny render target for measuring each camera's brightness (Sharp motion exposure control).
+    private val lumaTex = IntArray(1)
+    private val lumaFbo = IntArray(1)
+    private val lumaBuf = ByteBuffer.allocateDirect(LUMA_SIZE * LUMA_SIZE * 4).order(ByteOrder.nativeOrder())
+    private val lumaFrame = IntArray(2)
+    @Volatile var measureLuma = false
+    @Volatile private var luma0 = -1f
+    @Volatile private var luma1 = -1f
+
+    /** Average brightness (0..1) of camera [slot]'s centre, or -1 if not measured yet. */
+    fun luma(slot: Int): Float = if (slot == 0) luma0 else luma1
+
     // Person mask for the cutout layout.
     private var maskTex = 0
     private var maskReady = false
@@ -335,6 +347,18 @@ class DualRenderer {
                 GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, fboTex[i], 0
             )
         }
+        GLES20.glGenTextures(1, lumaTex, 0)
+        GLES20.glGenFramebuffers(1, lumaFbo, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lumaTex[0])
+        GLES20.glTexImage2D(
+            GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, LUMA_SIZE, LUMA_SIZE, 0,
+            GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null
+        )
+        setTexParams(GLES20.GL_TEXTURE_2D)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, lumaFbo[0])
+        GLES20.glFramebufferTexture2D(
+            GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, lumaTex[0], 0
+        )
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
         val mt = IntArray(2)
@@ -426,6 +450,7 @@ class DualRenderer {
             stream.st.updateTexImage()
             stream.st.getTransformMatrix(stream.matrix)
             stream.hasFrame = true
+            if (measureLuma && ++lumaFrame[slot] % 5 == 0) measureLuma(stream, slot)
 
             if (!displayPaused && displaySurface != EGL14.EGL_NO_SURFACE && displayW > 0 && displayH > 0) {
                 makeCurrent(displaySurface)
@@ -442,6 +467,25 @@ class DualRenderer {
         } catch (e: Exception) {
             Log.e(TAG, "Frame render failed", e)
         }
+    }
+
+    /** Renders the stream's centre into a tiny buffer and averages its brightness. */
+    private fun measureLuma(stream: Stream, slot: Int) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, lumaFbo[0])
+        drawStream(stream, slot, 0, 0, LUMA_SIZE, LUMA_SIZE, displayRotationDeg, aspectOverride = 1f)
+        lumaBuf.rewind()
+        GLES20.glReadPixels(0, 0, LUMA_SIZE, LUMA_SIZE, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, lumaBuf)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        var sum = 0.0
+        val n = LUMA_SIZE * LUMA_SIZE
+        for (i in 0 until n) {
+            val r = lumaBuf.get(i * 4).toInt() and 0xFF
+            val g = lumaBuf.get(i * 4 + 1).toInt() and 0xFF
+            val b = lumaBuf.get(i * 4 + 2).toInt() and 0xFF
+            sum += 0.299 * r + 0.587 * g + 0.114 * b
+        }
+        val l = (sum / n / 255.0).toFloat()
+        if (slot == 0) luma0 = l else luma1 = l
     }
 
     private fun backSlot(): Int = if (isFront[0] && !isFront[1]) 1 else 0
@@ -783,6 +827,7 @@ class DualRenderer {
     companion object {
         private const val TAG = "DualRenderer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val LUMA_SIZE = 16
         private const val BLUR_W = 120
         private const val BLUR_H = 120
 
