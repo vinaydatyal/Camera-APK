@@ -647,7 +647,7 @@ class MainActivity : AppCompatActivity() {
         if (speedBusy) return
         val (uri, ranges) = speedQueue.removeFirstOrNull() ?: return
         speedBusy = true
-        bgExporter.speedUp(uri, ranges, fastSpeed.toFloat(), {}, motionBlur = ffMotionBlur) { out, error ->
+        bgExporter.speedUp(uri, ranges, fastSpeed.toFloat(), ffMotionBlur, {}) { out, error ->
             speedBusy = false
             if (out != null) {
                 Toast.makeText(this, "⏩ Fast-forward version saved (Movies/VlogCam/Exports)", Toast.LENGTH_LONG).show()

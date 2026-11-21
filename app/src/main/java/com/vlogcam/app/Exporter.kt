@@ -154,8 +154,8 @@ class Exporter(private val context: Context) {
      */
     fun speedUp(
         source: Uri, rangesMs: List<Pair<Long, Long>>, speed: Float,
+        motionBlur: Boolean,
         onProgress: (Int) -> Unit, onDone: (Uri?, String?) -> Unit,
-        motionBlur: Boolean = true,
     ) {
         cancelled = false
         val rangesUs = rangesMs.map { it.first * 1000 to it.second * 1000 }.sortedBy { it.first }
