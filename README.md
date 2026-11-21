@@ -68,6 +68,12 @@ the front and rear cameras record at the same time into a single video.
   own exposure control, and Video mode gets the 30 fps lock.
 - A vibration-damping phone mount is still the biggest single improvement.
 
+**Horizon levelling (⚙ Settings → Ride → Horizon, Dual/Vlog mode, road camera only)**
+- **Level mount:** gently straightens a crooked mount and slow rolls (up to 8°).
+- **Lock horizon:** faster correction for bumps and small tilts (up to 15°).
+- The road image is rotated back using the phone's motion sensors and zoomed just enough to hide the
+  corners (about 15% at 5°). Full corner leans (20–40°) aren't corrected.
+
 **Controls**
 - Top bar: flash/torch, timer, stabilization, mic, and **⚙ Settings** (Camera, Dual/Vlog, Sound, Ride
   sections, plus a buttons & gestures cheat sheet).

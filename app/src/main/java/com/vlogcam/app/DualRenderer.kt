@@ -119,6 +119,11 @@ class DualRenderer {
     private val lumaBuf = ByteBuffer.allocateDirect(LUMA_SIZE * LUMA_SIZE * 4).order(ByteOrder.nativeOrder())
     private val lumaFrame = IntArray(2)
     @Volatile var measureLuma = false
+
+    /** Horizon levelling for the rear camera: rotation (degrees, + = counter-clockwise sampling). */
+    @Volatile var levelAngleDeg = 0f
+    /** Angle used to size the anti-corner zoom (changes more slowly than the rotation itself). */
+    @Volatile var levelZoomAngleDeg = 0f
     @Volatile private var luma0 = -1f
     @Volatile private var luma1 = -1f
 
@@ -714,11 +719,41 @@ class DualRenderer {
         val front = isFront[slot]
         val flip = front && (if (camTransform) !mirrorFront else mirrorFront)
 
+        // Horizon levelling (rear camera): rotate the sampled window about its centre and zoom
+        // just enough that the rotated window stays inside the camera image (no empty corners).
+        val angle = if (!front) levelAngleDeg else 0f
+        val zoomAngle = if (!front) levelZoomAngleDeg else 0f
+        val level = angle != 0f || zoomAngle != 0f
+        val uc = (u0 + u1) / 2f
+        val vc = (v0 + v1) / 2f
+        val hx = (u1 - u0) / 2f * src   // half-extents in square (metric) units
+        val hy = (v1 - v0) / 2f
+        var zoom = 1f
+        var ca = 1f
+        var sa = 0f
+        if (level) {
+            val za = Math.toRadians(abs(zoomAngle).toDouble())
+            val zc = kotlin.math.cos(za).toFloat()
+            val zs = kotlin.math.sin(za).toFloat()
+            val halfW = src / 2f
+            val halfH = 0.5f
+            zoom = max(1f, max((hx * zc + hy * zs) / halfW, (hx * zs + hy * zc) / halfH))
+            val a = Math.toRadians(angle.toDouble())
+            ca = kotlin.math.cos(a).toFloat()
+            sa = kotlin.math.sin(a).toFloat()
+        }
+
         for (i in 0 until 4) {
             val cu = (i % 2).toFloat()
             val cv = (i / 2).toFloat()
-            val du = u0 + cu * (u1 - u0)  // displayed (upright) coords
-            val dv = v0 + cv * (v1 - v0)
+            var du = u0 + cu * (u1 - u0)  // displayed (upright) coords
+            var dv = v0 + cv * (v1 - v0)
+            if (level) {
+                val ox = (cu * 2f - 1f) * hx / zoom
+                val oy = (cv * 2f - 1f) * hy / zoom
+                du = uc + (ox * ca - oy * sa) / src
+                dv = vc + (ox * sa + oy * ca)
+            }
             val u = if (flip) 1f - du else du
             // Map upright coords back to the (matrix-space) source, undoing a clockwise rotation r.
             val sx: Float

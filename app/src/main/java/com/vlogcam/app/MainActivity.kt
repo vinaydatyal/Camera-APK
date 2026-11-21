@@ -302,13 +302,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        handler.post { updateHud() }
+        handler.post { updateHud(); updateHorizonSensor() }
     }
 
     override fun onStop() {
         super.onStop()
         if (mediaRecorder != null) stopDualRecording()
-        handler.post { updateHud() }
+        handler.post { updateHud(); updateHorizonSensor() }
     }
 
     override fun onDestroy() {
@@ -460,6 +460,78 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------------------------------------------------------------- fast-forward sections
+
+    // ---------------------------------------------------------------- horizon levelling
+
+    private var horizonMode = 0  // 0 = off, 1 = level mount, 2 = lock horizon
+    private val sensorManager by lazy { getSystemService(Context.SENSOR_SERVICE) as android.hardware.SensorManager }
+    private var horizonRegistered = false
+    private var levelAngle = 0f
+    private var levelZoomAngle = 0f
+    private var lastHorizonNs = 0L
+    private val rotMatrix = FloatArray(9)
+
+    private val horizonListener = object : android.hardware.SensorEventListener {
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            val upX: Float
+            val upY: Float
+            if (e.sensor.type == android.hardware.Sensor.TYPE_GAME_ROTATION_VECTOR) {
+                android.hardware.SensorManager.getRotationMatrixFromVector(rotMatrix, e.values)
+                upX = rotMatrix[6]   // world "up" expressed in phone coordinates
+                upY = rotMatrix[7]
+            } else {
+                upX = e.values[0]    // gravity sensor: points up when the phone is still
+                upY = e.values[1]
+            }
+            if (upX * upX + upY * upY < 0.05f) return  // phone lying flat: no horizon to level
+            // Phone tilt (clockwise +), relative to the current screen orientation.
+            var err = Math.toDegrees(kotlin.math.atan2(-upX, upY).toDouble()).toFloat() +
+                (dualRenderer?.displayRotationDeg ?: 0)
+            while (err > 180f) err -= 360f
+            while (err < -180f) err += 360f
+            val maxDeg = if (horizonMode == 2) 15f else 8f
+            val target = if (abs(err) > 30f) 0f else err.coerceIn(-maxDeg, maxDeg)
+
+            val now = e.timestamp
+            val dt = if (lastHorizonNs == 0L) 0.02f else ((now - lastHorizonNs) / 1e9f).coerceIn(0f, 0.2f)
+            lastHorizonNs = now
+            val tau = if (horizonMode == 2) 0.25f else 1.2f
+            levelAngle += (target - levelAngle) * (1f - kotlin.math.exp(-dt / tau))
+            // Zoom grows immediately but relaxes slowly, so the picture doesn't pump in and out.
+            val need = abs(levelAngle)
+            levelZoomAngle = if (need > levelZoomAngle) need
+            else levelZoomAngle + (need - levelZoomAngle) * (1f - kotlin.math.exp(-dt / 3f))
+            dualRenderer?.levelAngleDeg = levelAngle
+            dualRenderer?.levelZoomAngleDeg = levelZoomAngle
+        }
+
+        override fun onAccuracyChanged(sensor: android.hardware.Sensor?, accuracy: Int) {}
+    }
+
+    /** Runs the tilt sensor only when levelling is on, in Dual/Vlog mode, with the app visible. */
+    private fun updateHorizonSensor() {
+        val want = horizonMode > 0 && mode == Mode.DUAL &&
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        if (want && !horizonRegistered) {
+            val sensor = sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_GAME_ROTATION_VECTOR)
+                ?: sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_GRAVITY)
+            if (sensor != null) {
+                lastHorizonNs = 0L
+                horizonRegistered = sensorManager.registerListener(
+                    horizonListener, sensor, android.hardware.SensorManager.SENSOR_DELAY_GAME
+                )
+            }
+        } else if (!want && horizonRegistered) {
+            sensorManager.unregisterListener(horizonListener)
+            horizonRegistered = false
+        }
+        if (!horizonRegistered) {
+            levelAngle = 0f
+            levelZoomAngle = 0f
+            dualRenderer?.levelAngleDeg = 0f
+            dualRenderer?.levelZoomAngleDeg = 0f
+        }
+    }
 
     private var sharpOn = false
     private var soloSlot = 0
@@ -732,6 +804,7 @@ class MainActivity : AppCompatActivity() {
         rideAuto = prefs.getBoolean("rideAuto", true)
         fastSpeed = prefs.getInt("fastSpeed", 8)
         sharpOn = prefs.getBoolean("sharp", false)
+        horizonMode = prefs.getInt("horizon", 0).coerceIn(0, 2)
         micChoice = prefs.getString("micChoice", "phone")!!
         windLevel = prefs.getInt("wind", 0)
         overlayOn = prefs.getBoolean("overlay", false)
@@ -760,6 +833,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("rideAuto", rideAuto)
             .putInt("fastSpeed", fastSpeed)
             .putBoolean("sharp", sharpOn)
+            .putInt("horizon", horizonMode)
             .putString("micChoice", micChoice)
             .putInt("wind", windLevel)
             .putBoolean("overlay", overlayOn)
@@ -897,6 +971,7 @@ class MainActivity : AppCompatActivity() {
             applySharp()
         }
         updateHud()
+        updateHorizonSensor()
         refreshUi()
     }
 
@@ -1405,6 +1480,11 @@ class MainActivity : AppCompatActivity() {
             refreshUi()
         }
         b.btnSettings.setOnClickListener { showSettingsSheet() }
+        b.btnHorizon.setOnClickListener {
+            horizonMode = (horizonMode + 1) % 3
+            updateHorizonSensor()
+            refreshUi()
+        }
         b.btnSharp.setOnClickListener {
             if (sharpOn) {
                 sharpOn = false
@@ -1647,6 +1727,8 @@ class MainActivity : AppCompatActivity() {
         b.btnFast.setTextColor(if (fastActive) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
         b.btnFastSpeed.text = "⏩ Fast-forward speed ${fastSpeed}x"
         b.btnSharp.visibility = if (mode == Mode.PHOTO) View.GONE else View.VISIBLE
+        b.btnHorizon.visibility = if (mode == Mode.DUAL) View.VISIBLE else View.GONE
+        b.btnHorizon.text = "Horizon " + arrayOf("Off", "Level mount", "Lock horizon")[horizonMode]
         b.btnSharp.text = if (sharpOn) "Sharp motion On" else "Sharp motion Off"
         b.btnSettings.visibility = if (isRecording) View.GONE else View.VISIBLE
         b.btnPause.visibility = if (isRecording) View.VISIBLE else View.GONE
@@ -2194,6 +2276,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }),
             SettingRow("Ride", "Fast-forward speed", b.btnFastSpeed, { "${fastSpeed}x" }),
+            SettingRow("Ride", "Horizon (road camera)", b.btnHorizon, {
+                arrayOf("Off", "Level mount", "Lock horizon")[horizonMode]
+            }),
         )
         val dp = resources.displayMetrics.density
         val sheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
